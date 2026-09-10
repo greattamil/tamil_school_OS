@@ -39,6 +39,28 @@ Built in phases per the PRD's release plan (section 9). See
 docker compose run --rm migrate
 ```
 
+### Admin panel
+
+The API must already be running (via Docker Compose, above) since the admin panel
+talks to it over HTTP.
+
+```
+cd admin-panel
+cp .env.local.example .env.local
+npm install
+npm run dev
+```
+
+Open http://localhost:3000. There's no self-serve sign-up yet -- create a school and
+its first correspondent login with the seed tool:
+
+```
+cd backend
+DATABASE_URL="postgres://app_user:$APP_DB_PASSWORD@localhost:5432/school_erp?sslmode=disable" \
+  go run ./cmd/seed -school "My School" -short-code myschool \
+  -email admin@example.com -name "Admin Name" -password "ChangeMe123!"
+```
+
 ### Running tests
 
 Unit tests (no Docker required):

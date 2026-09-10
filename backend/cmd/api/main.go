@@ -84,9 +84,11 @@ func run() error {
 	// tenant-scoped handlers.
 	rootMux.Handle("/", httpmw.RequireAuth(pool, tokenIssuer)(protectedMux))
 
+	handler := httpmw.CORS(cfg.AllowedOrigins)(rootMux)
+
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           rootMux,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

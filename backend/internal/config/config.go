@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,7 @@ type Config struct {
 	AccessTokenTTL  time.Duration
 	RefreshTokenTTL time.Duration
 	HTTPAddr        string
+	AllowedOrigins  map[string]bool
 }
 
 func Load() (Config, error) {
@@ -26,6 +28,7 @@ func Load() (Config, error) {
 		AccessTokenTTL:  15 * time.Minute,
 		RefreshTokenTTL: 30 * 24 * time.Hour,
 		HTTPAddr:        envOr("HTTP_ADDR", ":8080"),
+		AllowedOrigins:  parseOrigins(envOr("ALLOWED_ORIGINS", "http://localhost:3000")),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -42,4 +45,15 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func parseOrigins(csv string) map[string]bool {
+	origins := make(map[string]bool)
+	for _, o := range strings.Split(csv, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			origins[o] = true
+		}
+	}
+	return origins
 }

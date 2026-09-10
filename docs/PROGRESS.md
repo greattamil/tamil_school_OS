@@ -52,8 +52,24 @@ Done:
   exercised end-to-end over real HTTP against live containers, not just unit
   tests.
 
+- **Admin panel scaffolding (Next.js 16, App Router, TypeScript, Tailwind)**:
+  login (staff email/mobile + password), school picker for staff with roles at
+  more than one school, students list + create form, and the bulk-import UI
+  (CSV upload -> preview with per-row errors and the guardian-cluster review
+  list -> commit). Verified end-to-end with a real headless-browser session
+  (Playwright) against the live Docker stack: login, student creation, and a
+  full CSV import including picking "link" on a manual-review cluster -- zero
+  console errors, screenshots inspected. **Required adding CORS middleware to
+  the Go backend** (`internal/httpmw/cors.go`, `ALLOWED_ORIGINS` env var):
+  curl-based testing never exercises the browser's CORS preflight, so this
+  gap was invisible until the admin panel was actually driven in a browser --
+  worth remembering for the mobile app's HTTP layer too, though native HTTP
+  clients aren't subject to CORS the way browsers are.
+  Token storage is localStorage, called out in `api.ts` as scaffold-quality:
+  hardening (httpOnly cookies via a route-handler proxy, or a BFF pattern) is
+  follow-up work, not a Phase 1 blocker.
+
 Not yet done (explicitly deferred, not forgotten):
-- Admin panel scaffolding (Next.js) — up next.
 - SMS/OTP dispatch is stubbed (returns the code directly in the dev response body);
   real DLT-registered gateway integration is Phase 5 per the PRD, but the `OTP_LOGIN`
   template itself should be filed in week 1 per PRD 9 external-process note.
