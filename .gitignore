@@ -1,0 +1,28 @@
+# Environment / secrets
+.env
+*.env.local
+
+# Go
+backend/**/*.exe
+backend/**/*.test
+backend/vendor/
+
+# Node / Next.js
+admin-panel/node_modules/
+admin-panel/.next/
+admin-panel/out/
+
+# Flutter (added in Phase 2)
+mobile/build/
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local scratch
+*.log

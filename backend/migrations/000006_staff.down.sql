@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS section_teachers;
+DROP TABLE IF EXISTS staff;

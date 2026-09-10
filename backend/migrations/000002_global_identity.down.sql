@@ -1,0 +1,7 @@
+DROP TABLE IF EXISTS user_school_roles;
+DROP TYPE IF EXISTS user_role;
+DROP TABLE IF EXISTS otp_codes;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS credentials;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS schools;
