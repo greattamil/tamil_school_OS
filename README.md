@@ -26,7 +26,9 @@ Built in phases per the PRD's release plan (section 9). See
    docker compose up -d
    ```
 
-   This starts Postgres and Redis, runs migrations to completion, then starts the API.
+   This starts Postgres and Redis, runs migrations to completion, then starts the API
+   and the background worker (`cmd/worker`: job queue processing, the
+   absence-notification scan).
 3. Check it's up:
 
    ```

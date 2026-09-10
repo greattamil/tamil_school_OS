@@ -19,6 +19,10 @@ var requiredColumns = []string{
 func parseCSV(r io.Reader) ([]row, error) {
 	reader := csv.NewReader(r)
 	reader.TrimLeadingSpace = true
+	// See the matching comment in internal/fees/repository.go: a row with the
+	// wrong field count must become a per-row validation error, not abort every
+	// row after it.
+	reader.FieldsPerRecord = -1
 
 	header, err := reader.Read()
 	if err != nil {

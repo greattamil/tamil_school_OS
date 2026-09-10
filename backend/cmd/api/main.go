@@ -11,13 +11,16 @@ import (
 	"time"
 
 	"school-erp/backend/internal/academic"
+	"school-erp/backend/internal/attendance"
 	"school-erp/backend/internal/auth"
 	"school-erp/backend/internal/bulkimport"
 	"school-erp/backend/internal/config"
 	appdb "school-erp/backend/internal/db"
 	"school-erp/backend/internal/enrollments"
+	"school-erp/backend/internal/fees"
 	"school-erp/backend/internal/guardians"
 	"school-erp/backend/internal/httpmw"
+	"school-erp/backend/internal/notify"
 	"school-erp/backend/internal/staff"
 	"school-erp/backend/internal/students"
 )
@@ -65,6 +68,15 @@ func run() error {
 	importService := bulkimport.NewService(studentRepo, guardianRepo, enrollmentRepo, academicRepo)
 	importHandlers := bulkimport.NewHandlers(importService)
 
+	attendanceRepo := attendance.NewRepository(pool)
+	attendanceHandlers := attendance.NewHandlers(attendanceRepo)
+
+	notifyRepo := notify.NewRepository(pool)
+	notifyHandlers := notify.NewHandlers(notifyRepo)
+
+	feesRepo := fees.NewRepository(pool)
+	feesHandlers := fees.NewHandlers(feesRepo)
+
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("GET /healthz", healthHandler(pool))
 	authHandlers.Register(rootMux)
@@ -76,6 +88,9 @@ func run() error {
 	guardianHandlers.Register(protectedMux)
 	enrollmentHandlers.Register(protectedMux)
 	importHandlers.Register(protectedMux)
+	attendanceHandlers.Register(protectedMux)
+	notifyHandlers.Register(protectedMux)
+	feesHandlers.Register(protectedMux)
 
 	// Any path not matched by an exact route above (health check, auth) falls
 	// through to the protected mux, which sits behind RequireAuth. Go's ServeMux

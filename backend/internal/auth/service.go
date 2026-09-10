@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"school-erp/backend/internal/db"
+	"school-erp/backend/internal/tenancy"
 )
 
 var (
@@ -139,17 +140,117 @@ func (s *Service) VerifyParentOTP(ctx context.Context, mobile, code, deviceID st
 		return TokenPair{}, err
 	}
 
-	var userID uuid.UUID
-	err = db.WithGlobalTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
-			SELECT id FROM users WHERE mobile = $1 AND deleted_at IS NULL
-		`, mobile).Scan(&userID)
-	})
+	userID, err := s.findOrProvisionGuardianUser(ctx, mobile)
 	if err != nil {
-		return TokenPair{}, ErrInvalidCredentials
+		return TokenPair{}, err
 	}
 
 	return s.issueTokensForUser(ctx, userID, deviceID, nil)
+}
+
+// findOrProvisionGuardianUser resolves the global user identity for a verified
+// mobile number, provisioning one on first successful OTP login.
+//
+// This exists because of a real tension in the design (PRD 3.2.1): guardians are
+// tenant-scoped and RLS-protected (a guardian's occupation, name spelling etc. can
+// legitimately differ per school), but at the moment of OTP verification there is
+// no tenant context yet -- that's exactly the chicken-and-egg "which school does
+// this phone number belong to" problem the login flow has to solve. Staff avoid
+// this because user_school_roles is global. Guardians don't have an equivalent
+// global index, so the only way to answer "which schools has this mobile number
+// been added as a guardian at" without one is to check each school's tenant
+// context in turn. At PRD's target scale (15 schools) this is a handful of cheap
+// queries on a rare, low-frequency operation (first login only); it stops being
+// fine long before hundreds of schools, at which point a dedicated global
+// mobile-to-school index (mirroring user_school_roles) is the right fix.
+func (s *Service) findOrProvisionGuardianUser(ctx context.Context, mobile string) (uuid.UUID, error) {
+	var existingID uuid.UUID
+	err := db.WithGlobalTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT id FROM users WHERE mobile = $1 AND deleted_at IS NULL`, mobile).Scan(&existingID)
+	})
+	if err == nil {
+		return existingID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, err
+	}
+
+	type guardianMatch struct {
+		schoolID     uuid.UUID
+		guardianID   uuid.UUID
+		guardianName string
+	}
+	var matches []guardianMatch
+
+	var schoolIDs []uuid.UUID
+	if err := db.WithGlobalTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT id FROM schools WHERE deleted_at IS NULL`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id uuid.UUID
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			schoolIDs = append(schoolIDs, id)
+		}
+		return rows.Err()
+	}); err != nil {
+		return uuid.Nil, fmt.Errorf("list schools: %w", err)
+	}
+
+	for _, schoolID := range schoolIDs {
+		schoolCtx := tenancy.WithSchoolID(ctx, schoolID)
+		var m guardianMatch
+		err := db.WithTenantTx(schoolCtx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `
+				SELECT id, name FROM guardians WHERE mobile = $1 AND user_id IS NULL AND deleted_at IS NULL LIMIT 1
+			`, mobile).Scan(&m.guardianID, &m.guardianName)
+		})
+		if err == nil {
+			m.schoolID = schoolID
+			matches = append(matches, m)
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, fmt.Errorf("check guardians at school %s: %w", schoolID, err)
+		}
+	}
+
+	if len(matches) == 0 {
+		return uuid.Nil, ErrInvalidCredentials
+	}
+
+	var newUserID uuid.UUID
+	if err := db.WithGlobalTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			INSERT INTO users (mobile, display_name) VALUES ($1, $2) RETURNING id
+		`, mobile, matches[0].guardianName).Scan(&newUserID)
+	}); err != nil {
+		return uuid.Nil, fmt.Errorf("provision guardian user: %w", err)
+	}
+
+	for _, m := range matches {
+		schoolCtx := tenancy.WithSchoolID(ctx, m.schoolID)
+		if err := db.WithTenantTx(schoolCtx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE guardians SET user_id = $1 WHERE id = $2`, newUserID, m.guardianID)
+			return err
+		}); err != nil {
+			return uuid.Nil, fmt.Errorf("link guardian %s: %w", m.guardianID, err)
+		}
+		if err := db.WithGlobalTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO user_school_roles (user_id, school_id, role)
+				VALUES ($1, $2, 'parent')
+				ON CONFLICT (user_id, school_id, role) DO NOTHING
+			`, newUserID, m.schoolID)
+			return err
+		}); err != nil {
+			return uuid.Nil, fmt.Errorf("create parent role at school %s: %w", m.schoolID, err)
+		}
+	}
+
+	return newUserID, nil
 }
 
 // SelectSchool exchanges a valid refresh token for a new pair scoped to schoolID.

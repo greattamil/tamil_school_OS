@@ -65,6 +65,17 @@ func main() {
 		log.Fatalf("create school: %v", err)
 	}
 
+	// school_settings is RLS-protected like any other tenant table, so writing
+	// to it requires the tenant context to be set first, same as any other
+	// request (internal/db.WithTenantTx does this per-request; here it's a
+	// one-off administrative script, so it's done by hand).
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.current_school_id', $1, true)`, schoolID); err != nil {
+		log.Fatalf("set tenant context: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO school_settings (school_id) VALUES ($1)`, schoolID); err != nil {
+		log.Fatalf("create school settings: %v", err)
+	}
+
 	var userID string
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO users (email, display_name) VALUES ($1, $2) RETURNING id`,

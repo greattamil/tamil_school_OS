@@ -63,5 +63,17 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
 
+  worker:
+    build:
+      context: ./backend
+    entrypoint: ["/usr/local/bin/worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://app_user:${APP_DB_PASSWORD}@postgres:5432/school_erp?sslmode=disable
+
 volumes:
   pgdata:
