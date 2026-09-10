@@ -201,7 +201,15 @@ convenience only -- see below).
   register-older-than-24-hours warning (PRD 4.2.5), and the
   battery-optimization-exemption onboarding prompt (PRD 4.2.5) -- all
   reasonable follow-ups once the core sync mechanism (done) is exercised on
-  a real device over multiple days.
+  a real device over multiple days. Also owed: a fresh on-device run to
+  visually confirm the isolateSetup fix above (blocked mid-session by the
+  shared emulator running out of storage, not by anything in the fix
+  itself).
+- **CI now covers mobile too**: added a `mobile` job to
+  `.github/workflows/backend-ci.yml` (`flutter analyze` + `flutter test`,
+  the in-memory-database suite -- no emulator needed for that, so it's a
+  normal fast CI job, not something blocked by the storage issue above).
+  The workflow's display name changed from `backend-ci` to `ci` to match.
 
 ### Backend: not yet started
 
