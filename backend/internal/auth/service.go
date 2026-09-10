@@ -14,11 +14,11 @@ import (
 )
 
 var (
-	ErrInvalidCredentials = errors.New("auth: invalid credentials")
-	ErrOTPInvalid         = errors.New("auth: invalid or expired otp")
+	ErrInvalidCredentials  = errors.New("auth: invalid credentials")
+	ErrOTPInvalid          = errors.New("auth: invalid or expired otp")
 	ErrOTPAttemptsExceeded = errors.New("auth: too many otp attempts")
-	ErrSessionRevoked     = errors.New("auth: session revoked")
-	ErrNoSchoolAccess     = errors.New("auth: no role at requested school")
+	ErrSessionRevoked      = errors.New("auth: session revoked")
+	ErrNoSchoolAccess      = errors.New("auth: no role at requested school")
 )
 
 const (
@@ -39,8 +39,8 @@ type TokenPair struct {
 }
 
 type Service struct {
-	pool   *pgxpool.Pool
-	tokens *TokenIssuer
+	pool            *pgxpool.Pool
+	tokens          *TokenIssuer
 	refreshTokenTTL time.Duration
 }
 
@@ -53,9 +53,9 @@ func NewService(pool *pgxpool.Pool, tokens *TokenIssuer, refreshTokenTTL time.Du
 // directly; otherwise the caller must call SelectSchool next (PRD 3.2.1).
 func (s *Service) StaffLogin(ctx context.Context, identifier, password, deviceID string) (TokenPair, error) {
 	var (
-		userID       uuid.UUID
+		userID           uuid.UUID
 		tokensValidAfter time.Time
-		passwordHash string
+		passwordHash     string
 	)
 
 	err := db.WithGlobalTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {

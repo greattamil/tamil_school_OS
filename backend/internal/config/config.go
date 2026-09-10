@@ -10,12 +10,12 @@ import (
 )
 
 type Config struct {
-	DatabaseURL       string
-	RedisURL          string
-	JWTSecret         string
-	AccessTokenTTL    time.Duration
-	RefreshTokenTTL   time.Duration
-	HTTPAddr          string
+	DatabaseURL     string
+	RedisURL        string
+	JWTSecret       string
+	AccessTokenTTL  time.Duration
+	RefreshTokenTTL time.Duration
+	HTTPAddr        string
 }
 
 func Load() (Config, error) {

@@ -19,15 +19,15 @@ var ErrInvalidToken = errors.New("auth: invalid or expired token")
 // scoped to at issuance. Selecting a school issues a new token; there is no
 // parameter that changes tenant on an existing one (PRD 3.2.1).
 type AccessClaims struct {
-	UserID   uuid.UUID `json:"uid"`
+	UserID   uuid.UUID  `json:"uid"`
 	SchoolID *uuid.UUID `json:"sid,omitempty"`
-	Role     string    `json:"role,omitempty"`
+	Role     string     `json:"role,omitempty"`
 	jwt.RegisteredClaims
 }
 
 type TokenIssuer struct {
-	secret          []byte
-	accessTokenTTL  time.Duration
+	secret         []byte
+	accessTokenTTL time.Duration
 }
 
 func NewTokenIssuer(secret string, accessTokenTTL time.Duration) *TokenIssuer {

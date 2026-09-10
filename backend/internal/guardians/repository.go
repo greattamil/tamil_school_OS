@@ -1,0 +1,141 @@
+package guardians
+
+import (
+	"context"
+	"errors"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"school-erp/backend/internal/db"
+	"school-erp/backend/internal/tenancy"
+)
+
+var ErrNotFound = errors.New("guardians: not found")
+
+type Repository struct {
+	pool *pgxpool.Pool
+}
+
+func NewRepository(pool *pgxpool.Pool) *Repository {
+	return &Repository{pool: pool}
+}
+
+func (r *Repository) Create(ctx context.Context, name, mobile string, email, occupation *string) (Guardian, error) {
+	schoolID, ok := tenancy.SchoolID(ctx)
+	if !ok {
+		return Guardian{}, db.ErrNoTenant
+	}
+
+	var out Guardian
+	err := db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			INSERT INTO guardians (school_id, name, mobile, email, occupation)
+			VALUES ($1,$2,$3,$4,$5)
+			RETURNING id, name, mobile, email, occupation, created_at
+		`, schoolID, name, mobile, email, occupation).Scan(&out.ID, &out.Name, &out.Mobile, &out.Email, &out.Occupation, &out.CreatedAt)
+	})
+	return out, err
+}
+
+// FindByMobile returns every guardian at this school already registered under
+// mobile, so the caller can offer to link rather than create a duplicate
+// (PRD 4.1.2: "Detect existing guardian by mobile number and offer to link rather
+// than duplicate -- this is how sibling grouping happens").
+func (r *Repository) FindByMobile(ctx context.Context, mobile string) ([]Guardian, error) {
+	out := []Guardian{}
+	err := db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT id, name, mobile, email, occupation, created_at
+			FROM guardians WHERE mobile = $1 AND deleted_at IS NULL
+		`, mobile)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var g Guardian
+			if err := rows.Scan(&g.ID, &g.Name, &g.Mobile, &g.Email, &g.Occupation, &g.CreatedAt); err != nil {
+				return err
+			}
+			out = append(out, g)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// LinkToStudent attaches an existing guardian to a student. Uniqueness of
+// (student_id, guardian_id) is enforced by the schema; callers that need "one
+// primary contact" / "one fee-responsible" semantics must clear existing flags
+// themselves in the same request if that invariant matters to them.
+func (r *Repository) LinkToStudent(ctx context.Context, link StudentGuardianLink) error {
+	schoolID, ok := tenancy.SchoolID(ctx)
+	if !ok {
+		return db.ErrNoTenant
+	}
+
+	return db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO student_guardians (school_id, student_id, guardian_id, relationship, is_primary_contact, is_fee_responsible)
+			VALUES ($1,$2,$3,$4,$5,$6)
+			ON CONFLICT (student_id, guardian_id) DO UPDATE SET
+				relationship = EXCLUDED.relationship,
+				is_primary_contact = EXCLUDED.is_primary_contact,
+				is_fee_responsible = EXCLUDED.is_fee_responsible
+		`, schoolID, link.StudentID, link.GuardianID, link.Relationship, link.IsPrimaryContact, link.IsFeeResponsible)
+		return err
+	})
+}
+
+func (r *Repository) Get(ctx context.Context, id uuid.UUID) (Guardian, error) {
+	var out Guardian
+	err := db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT id, name, mobile, email, occupation, created_at
+			FROM guardians WHERE id = $1 AND deleted_at IS NULL
+		`, id).Scan(&out.ID, &out.Name, &out.Mobile, &out.Email, &out.Occupation, &out.CreatedAt)
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Guardian{}, ErrNotFound
+		}
+		return Guardian{}, err
+	}
+	return out, nil
+}
+
+type GuardianWithLink struct {
+	Guardian
+	Relationship     Relationship `json:"relationship"`
+	IsPrimaryContact bool         `json:"is_primary_contact"`
+	IsFeeResponsible bool         `json:"is_fee_responsible"`
+}
+
+func (r *Repository) ListForStudent(ctx context.Context, studentID uuid.UUID) ([]GuardianWithLink, error) {
+	out := []GuardianWithLink{}
+	err := db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT g.id, g.name, g.mobile, g.email, g.occupation, g.created_at,
+			       sg.relationship, sg.is_primary_contact, sg.is_fee_responsible
+			FROM student_guardians sg
+			JOIN guardians g ON g.id = sg.guardian_id
+			WHERE sg.student_id = $1 AND sg.deleted_at IS NULL AND g.deleted_at IS NULL
+		`, studentID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var g GuardianWithLink
+			if err := rows.Scan(&g.ID, &g.Name, &g.Mobile, &g.Email, &g.Occupation, &g.CreatedAt,
+				&g.Relationship, &g.IsPrimaryContact, &g.IsFeeResponsible); err != nil {
+				return err
+			}
+			out = append(out, g)
+		}
+		return rows.Err()
+	})
+	return out, err
+}

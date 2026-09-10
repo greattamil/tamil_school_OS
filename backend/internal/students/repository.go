@@ -88,7 +88,7 @@ func (r *Repository) List(ctx context.Context, cursor string, limit int) ([]Stud
 		limit = 50
 	}
 
-	var out []Student
+	out := []Student{}
 	err := db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT id, admission_number, name_english, name_tamil, date_of_birth,
