@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"school-erp/backend/internal/db"
+	"school-erp/backend/internal/tenancy"
 )
 
 type Handlers struct {
@@ -22,6 +23,7 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/guardians", h.create)
 	mux.HandleFunc("GET /api/v1/guardians/{id}", h.get)
 	mux.HandleFunc("GET /api/v1/guardians", h.findByMobile)
+	mux.HandleFunc("GET /api/v1/parent/children", h.listChildren)
 	mux.HandleFunc("POST /api/v1/students/{id}/guardians", h.linkToStudent)
 	mux.HandleFunc("GET /api/v1/students/{id}/guardians", h.listForStudent)
 }
@@ -128,6 +130,16 @@ func (h *Handlers) listForStudent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": list})
+}
+
+func (h *Handlers) listChildren(w http.ResponseWriter, r *http.Request) {
+	userID, _ := tenancy.UserID(r.Context())
+	children, err := h.repo.ListChildrenForUser(r.Context(), userID)
+	if err != nil {
+		writeRepoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": children})
 }
 
 func writeRepoError(w http.ResponseWriter, err error) {

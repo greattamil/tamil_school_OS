@@ -106,6 +106,50 @@ func (r *Repository) Get(ctx context.Context, id uuid.UUID) (Guardian, error) {
 	return out, nil
 }
 
+// Child is a student as seen from a parent's own dashboard (PRD 4.8): enough
+// to identify and switch between children, not the full student record.
+type Child struct {
+	StudentID       uuid.UUID    `json:"student_id"`
+	NameEnglish     string       `json:"name_english"`
+	AdmissionNumber string       `json:"admission_number"`
+	Relationship    Relationship `json:"relationship"`
+}
+
+// ListChildrenForUser answers "which students is this logged-in parent a
+// guardian of" -- the query the parent app's child selector runs right after
+// login (PRD 4.8: "A parent with two or more children in the school switches
+// between them with a child selector"). There is deliberately no equivalent
+// "list my schools" cross-tenant version of this: which schools a user holds
+// a role at comes from the global user_school_roles table (PRD 3.2.1); this
+// answers the tenant-scoped question of which students they're linked to
+// *within* the school the caller's session is already scoped to.
+func (r *Repository) ListChildrenForUser(ctx context.Context, userID uuid.UUID) ([]Child, error) {
+	out := []Child{}
+	err := db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT s.id, s.name_english, s.admission_number, sg.relationship
+			FROM student_guardians sg
+			JOIN guardians g ON g.id = sg.guardian_id
+			JOIN students s ON s.id = sg.student_id
+			WHERE g.user_id = $1 AND sg.deleted_at IS NULL AND g.deleted_at IS NULL AND s.deleted_at IS NULL
+			ORDER BY s.name_english
+		`, userID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var c Child
+			if err := rows.Scan(&c.StudentID, &c.NameEnglish, &c.AdmissionNumber, &c.Relationship); err != nil {
+				return err
+			}
+			out = append(out, c)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
 type GuardianWithLink struct {
 	Guardian
 	Relationship     Relationship `json:"relationship"`

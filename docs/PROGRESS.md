@@ -85,12 +85,126 @@ this file now tracks Phase 2 onward in detail.
 - `cmd/worker`: the separate background-job process from PRD 8.1, added to
   Docker Compose. Runs the job-claim loop and the absence-scan timer.
 
+- **Parent children endpoint** (`internal/guardians`, `GET /api/v1/parent/children`):
+  added after the mobile parent dashboard exposed a real gap -- the OTP login
+  flow provisions a parent's identity and links their guardian rows, but
+  nothing let the app ask "which students is this logged-in parent actually
+  linked to." Verified end-to-end with a real parent OTP session.
+
+### Mobile app (Flutter) -- the actual Phase 2 headline deliverable
+
+`mobile/`, Android-first per the PRD (Windows desktop also enabled, dev/test
+convenience only -- see below).
+
+- **Offline-first attendance, the safety-critical piece**
+  (`lib/features/attendance/`): local-first writes (PRD 4.2.1: "Writes to
+  local SQLite first and confirms immediately"), an outbox queue, and a sync
+  engine implementing the client side of the exact protocol
+  `internal/attendance/conflict.go` enforces server-side -- `base_revision`
+  captured from local state at write time (never recomputed later),
+  `local_counter` persisted in the local DB itself so an app restart mid-
+  session can't reissue a value the server already saw, and per-entry
+  (not per-batch) reconciliation of the sync response: applied edits update
+  the local revision, superseded/invalid edits overwrite local state with
+  the server's truth and surface a dialog telling the teacher which students
+  were overridden and to what (PRD 4.2.5 point 6). Foreground and
+  connectivity-regained are the sync triggers (PRD 4.2.5), not a periodic
+  background task. The marking screen defaults every student to present and
+  a single "Confirm & sync" action writes the whole register in one batch
+  (PRD 4.2.1), matching the actual described flow rather than a tap-per-sync
+  design.
+- **Local encrypted storage** (`lib/core/db/`): Drift over SQLCipher, one
+  database file per school (`app_db_<school_id>.sqlite`, PRD 3.2.1) so
+  revoking one role's access is exactly "delete this file, discard this key"
+  with another school's roster on the same device untouched. Key generated
+  from a secure random source on first launch, stored via
+  `flutter_secure_storage` (Android Keystore-backed), never bound to
+  biometric enrollment (PRD 6.4: binding it would silently wipe a teacher's
+  local data the moment they enroll a fingerprint). `connection.dart`
+  verifies `PRAGMA cipher_version` is non-empty before trusting the key
+  pragma at all -- SQLCipher's key pragma fails silently against a plain
+  SQLite build rather than erroring, which would otherwise mean quietly
+  falling back to plaintext storage with no indication anything was wrong.
+- **Auth** (`lib/core/auth/`): staff password login and parent OTP login
+  against the same endpoints verified on the backend, token storage in
+  platform secure storage (never SharedPreferences, PRD 6.4), a school picker
+  for multi-school staff, and a `handleSessionRevoked` path that performs the
+  exact wipe PRD 6.2 specifies (purge key, delete the school's local DB file,
+  clear tokens) -- implemented as the *same* code path as a normal logout,
+  since the PRD's point is that revocation should be indistinguishable from a
+  deliberate wipe, not a special case bolted onto it.
+- **Parent dashboard** (`lib/features/parent/`): child selector for parents
+  with more than one child (PRD 4.8), attendance percentage and dues for the
+  selected child, and the recipient's own notice inbox.
+- **Verified for real, not just compiled**: `flutter analyze` clean, 6 tests
+  passing (`flutter test`) -- five exercise the local-only write path
+  (`markAttendance`/`confirmRegister`/`watchRoster`) against an in-memory
+  Drift database, checking specifically that `base_revision` and
+  `local_counter` are captured correctly, since a bug there would silently
+  break the server-side conflict resolution no amount of backend testing
+  could catch. The app was also launched on a real Android emulator
+  (API 36, x86_64) against the live Docker backend, driven end-to-end via
+  `adb input` and screenshots (no chromium-cli/device-automation tool was
+  available, so this was done directly): login screen rendered correctly,
+  staff login succeeded against the real API and routed to the right
+  screen, an invalid-password attempt correctly surfaced the server's error
+  message, the academic-year/class/section picker loaded and cascaded from
+  real API data, and the parent OTP flow's session persisted across an app
+  restart (auto-login from secure storage).
+- **A real on-device bug this surfaced, and the fix**: opening the section
+  roster came back empty every time, with the local database queries
+  themselves apparently succeeding (no crash, no thrown error visible
+  anywhere) -- suspicious given the same data was confirmed present via a
+  direct API call. Root cause: `NativeDatabase.createInBackground` runs all
+  database operations on a **separate Dart isolate**, and the
+  `open.overrideFor(OperatingSystem.android, openCipherOnAndroid)` call in
+  `main()` -- required so `package:sqlite3` opens the SQLCipher build instead
+  of the plain SQLite library Android also ships -- only applies to the
+  isolate that calls it. The background isolate silently fell back to plain
+  SQLite, which fails this codebase's own `PRAGMA cipher_version` guard in
+  `connection.dart` (added specifically so a silent fallback to plaintext
+  storage can't happen unnoticed, per PRD 6.4) -- so every query on that
+  isolate threw, and the attendance screen's `.catchError` swallowed it
+  with no visible sign beyond an empty list. Confirmed by temporarily
+  surfacing the caught error in the UI rather than guessing from logs, which
+  is what actually revealed the `StateError` (this back-and-forth, and the
+  Android emulator's storage running out mid-session while trying to close
+  the loop with a fresh install, is why this fix landed without a final
+  post-fix on-device re-run -- it's implemented and reasoned through against
+  Drift's own documented isolate-scoping behavior and the
+  sqlcipher_flutter_libs README's explicit warning about this exact case,
+  but the very last "empty roster now shows real students on a real device"
+  screenshot is still owed). Fixed by passing `isolateSetup:` to
+  `NativeDatabase.createInBackground`, which Drift runs once inside the new
+  isolate before any query -- re-applying the same override there closes the
+  gap. Also turned the screen's silent `.catchError` into a real (if
+  understated) error message in the empty-state UI, since this bug would
+  have been invisible without one.
+- **Dependency wrangling, worth recording**: the current Dart/Flutter
+  ecosystem has partially migrated SQLite bundling to a new native-assets
+  "hooks" build system (`sqlite3` 3.x), which `build_runner`'s script
+  compiler doesn't yet support -- even a transitive, iOS/macOS-only
+  dependency (`path_provider_foundation`'s `objective_c` bridge) pulling in a
+  hook broke Drift's code generation entirely. Fixed by pinning `drift`/
+  `drift_dev` to the 2.31 line (predates the hooks-based `sqlite3` 3.x) and
+  overriding `path_provider_foundation` to a pre-hooks release neither
+  Android nor Windows needs anyway. Separately, `sqlite3_flutter_libs` and
+  `sqlcipher_flutter_libs` must never be dependencies at the same time --
+  both bundle a plugin class under the same package name, which fails
+  Android's dex-merge step with a duplicate-class error. Since PRD 6.4
+  requires the local database always be encrypted, only
+  `sqlcipher_flutter_libs` is needed; its SQLCipher build is ABI-compatible
+  with plain sqlite3, so nothing is lost by not depending on both.
+- **Not yet done**: period-wise/half-day attendance (PRD 4.2.1 mentions it as
+  school-configurable; this pass only does whole-day), marks entry (Phase 4
+  per the PRD's own module scope, not missing from Phase 2), the pending-
+  register-older-than-24-hours warning (PRD 4.2.5), and the
+  battery-optimization-exemption onboarding prompt (PRD 4.2.5) -- all
+  reasonable follow-ups once the core sync mechanism (done) is exercised on
+  a real device over multiple days.
+
 ### Backend: not yet started
 
-- **Mobile app** (Flutter): this is the actual Phase 2 headline deliverable --
-  offline-first attendance marking with local-first writes, an outbox sync
-  queue, SQLCipher-encrypted local storage, and the client side of the
-  conflict-resolution protocol above. Starting next.
 - Class diary is Phase 4 per the PRD, not Phase 2 -- not started, correctly.
 - SMS rollover for undelivered push (PRD 4.5.3's emergency-broadcast
   requirement) is not implemented; the dispatch pipeline has the hook points

@@ -63,6 +63,10 @@ DATABASE_URL="postgres://app_user:$APP_DB_PASSWORD@localhost:5432/school_erp?ssl
   -email admin@example.com -name "Admin Name" -password "ChangeMe123!"
 ```
 
+### Mobile app
+
+See [mobile/README.md](mobile/README.md) -- the backend must be running first.
+
 ### Running tests
 
 Unit tests (no Docker required):
