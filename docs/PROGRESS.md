@@ -503,6 +503,19 @@ the screens themselves are unverified beyond compiling, linting, and
 rendering their initial HTML shell. Treat this UI as needing a real
 first-use pass by an actual person before relying on it at a real school.
 
+**That warning was immediately justified**: the user's very first real
+click -- voiding a payment on `/fees/students/[id]` -- hit a runtime error,
+`window.prompt() is not supported`, because this deployment environment
+doesn't support native browser dialogs at all. Both call sites (`prompt`
+for the void reason, `confirm`+`prompt` for the bounced-cheque return-charge
+decision) used them. Fixed by replacing both with inline panel UI using
+component state instead of native dialogs; re-running lint after the fix
+also caught two real ESLint errors (an unescaped apostrophe, a
+set-state-in-effect case) the prior lint pass hadn't been re-run against.
+Lesson worth keeping: "builds and lints clean" is not the same claim as
+"was clicked," and this UI's very first real interaction proved the gap
+between those two claims was not hypothetical.
+
 ### Fee event notifications -- built in the same later session
 
 `payment_receipt`, `fee_due_reminder` and `fee_overdue_reminder` (PRD 4.5.3)
