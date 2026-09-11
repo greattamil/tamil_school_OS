@@ -45,6 +45,13 @@ func (h *Handlers) registerPhase3(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/fees/annexure", h.annexureExport)
 	mux.HandleFunc("POST /api/v1/fees/assignments/{id}/rte", h.setRTEStatus)
 	mux.HandleFunc("GET /api/v1/fees/rte-students", h.listRTEStudents)
+
+	mux.HandleFunc("POST /api/v1/students/{id}/upi-requests", h.createUPIRequest)
+	mux.HandleFunc("GET /api/v1/students/{id}/upi-requests", h.listUPIRequestsForStudent)
+	mux.HandleFunc("GET /api/v1/fees/upi-requests/pending", h.pendingUPIRequests)
+	mux.HandleFunc("POST /api/v1/fees/upi-requests/{id}/utr", h.submitUTR)
+	mux.HandleFunc("POST /api/v1/fees/upi-requests/{id}/verify", h.verifyUPIRequest)
+	mux.HandleFunc("POST /api/v1/fees/upi-requests/{id}/reject", h.rejectUPIRequest)
 }
 
 func requireRole(w http.ResponseWriter, r *http.Request, allowed ...string) bool {
@@ -585,6 +592,125 @@ func (h *Handlers) listRTEStudents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+// --- UPI intent link + parent-submitted UTR (PRD 4.4.3.1's honest fallback) ---
+
+type createUPIRequestRequest struct {
+	Allocations []AllocationInput `json:"allocations"`
+	Note        string            `json:"note"`
+}
+
+func (h *Handlers) createUPIRequest(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, "correspondent", "office_admin") {
+		return
+	}
+	studentID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "invalid student id")
+		return
+	}
+	var req createUPIRequestRequest
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	actorID, _ := tenancy.UserID(r.Context())
+	out, err := h.repo.CreateUPIRequest(r.Context(), studentID, req.Allocations, req.Note, actorID)
+	if err != nil {
+		writeFeesRepoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (h *Handlers) listUPIRequestsForStudent(w http.ResponseWriter, r *http.Request) {
+	studentID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "invalid student id")
+		return
+	}
+	items, err := h.repo.ListUPIRequestsForStudent(r.Context(), studentID)
+	if err != nil {
+		writeFeesRepoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *Handlers) pendingUPIRequests(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, "correspondent", "office_admin") {
+		return
+	}
+	items, err := h.repo.PendingUPIRequests(r.Context())
+	if err != nil {
+		writeFeesRepoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+type submitUTRRequest struct {
+	UTR string `json:"utr"`
+}
+
+func (h *Handlers) submitUTR(w http.ResponseWriter, r *http.Request) {
+	requestID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "invalid request id")
+		return
+	}
+	var req submitUTRRequest
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	if err := h.repo.SubmitUTR(r.Context(), requestID, req.UTR); err != nil {
+		writeFeesRepoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handlers) verifyUPIRequest(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, "correspondent", "office_admin") {
+		return
+	}
+	requestID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "invalid request id")
+		return
+	}
+	actorID, _ := tenancy.UserID(r.Context())
+	payment, err := h.repo.VerifyUPIRequest(r.Context(), requestID, actorID)
+	if err != nil {
+		writeFeesRepoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, payment)
+}
+
+type rejectUPIRequestRequest struct {
+	Reason string `json:"reason"`
+}
+
+func (h *Handlers) rejectUPIRequest(w http.ResponseWriter, r *http.Request) {
+	if !requireRole(w, r, "correspondent", "office_admin") {
+		return
+	}
+	requestID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "invalid request id")
+		return
+	}
+	var req rejectUPIRequestRequest
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	actorID, _ := tenancy.UserID(r.Context())
+	if err := h.repo.RejectUPIRequest(r.Context(), requestID, req.Reason, actorID); err != nil {
+		writeFeesRepoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	defer r.Body.Close()
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
@@ -596,16 +722,18 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 
 func writeFeesRepoError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, ErrNotFound), errors.Is(err, ErrStructureNotFound), errors.Is(err, ErrPaymentNotFound), errors.Is(err, ErrConcessionNotFound):
+	case errors.Is(err, ErrNotFound), errors.Is(err, ErrStructureNotFound), errors.Is(err, ErrPaymentNotFound), errors.Is(err, ErrConcessionNotFound), errors.Is(err, ErrUPIRequestNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, ErrDuplicateHeadName), errors.Is(err, ErrAssignmentExists):
 		writeError(w, http.StatusConflict, "duplicate", err.Error())
 	case errors.Is(err, ErrNoActiveStructure):
 		writeError(w, http.StatusConflict, "no_active_structure", err.Error())
+	case errors.Is(err, ErrUPINotConfigured):
+		writeError(w, http.StatusConflict, "upi_not_configured", err.Error())
 	case errors.Is(err, ErrDrawerClosed), errors.Is(err, ErrAlreadyVoid), errors.Is(err, ErrDrawerAlreadyClosed),
 		errors.Is(err, ErrTooManyRecounts), errors.Is(err, ErrVarianceExplanationRequired), errors.Is(err, ErrDrawerNotReadyToClose),
 		errors.Is(err, ErrNotACheque), errors.Is(err, ErrInvalidChequeTransition), errors.Is(err, ErrInsufficientLineItemRoom),
-		errors.Is(err, ErrInsufficientCredit):
+		errors.Is(err, ErrInsufficientCredit), errors.Is(err, ErrUPIRequestNotPending), errors.Is(err, ErrUPIRequestNotSubmitted):
 		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, db.ErrNoTenant):
 		writeError(w, http.StatusForbidden, "no_tenant", "request is not scoped to a school")
