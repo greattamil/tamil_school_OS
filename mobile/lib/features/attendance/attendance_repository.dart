@@ -279,7 +279,12 @@ class AttendanceRepository {
             if (row.reason != null) 'reason': row.reason,
             'device_id': deviceId,
             'local_counter': row.localCounter,
-            'client_timestamp': row.clientTimestamp.toIso8601String(),
+            // Drift's SQLite round-trip loses the UTC flag on DateTime columns
+            // (the value read back is always isUtc: false, even though it was
+            // written from a .toUtc() DateTime) -- so toIso8601String() here
+            // would omit the 'Z' suffix and Go's RFC3339 time.Parse on the
+            // backend rejects it outright. Force UTC again before formatting.
+            'client_timestamp': row.clientTimestamp.toUtc().toIso8601String(),
             'base_revision': row.baseRevision,
           },
         )

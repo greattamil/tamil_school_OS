@@ -2,7 +2,8 @@
     <application
         android:label="mobile"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:networkSecurityConfig="@xml/network_security_config">
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -31,6 +32,13 @@
             android:name="flutterEmbedding"
             android:value="2" />
     </application>
+    <!-- Real network access for the app itself (API calls to the backend), not
+         to be confused with the debug-only INTERNET permission in
+         src/debug/AndroidManifest.xml, which exists purely for Flutter's own
+         tooling channel (hot reload etc.) and happens to unblock the app's own
+         HTTP calls in debug builds too. It grants nothing in release, where
+         this is the only permission making network access possible at all. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
          https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.

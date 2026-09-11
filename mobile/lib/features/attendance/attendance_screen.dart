@@ -91,9 +91,10 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen>
       if (result.overridden.isNotEmpty && mounted) {
         _showOverriddenDialog(result.overridden);
       }
-    } catch (_) {
+    } catch (e) {
       // Sync failure just leaves the outbox pending -- the visible pending
       // count and manual sync button are the teacher's remedy (PRD 4.2.5).
+      debugPrint('Attendance sync failed, left pending: $e');
     } finally {
       if (mounted) setState(() => _syncing = false);
     }
