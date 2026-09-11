@@ -26,6 +26,7 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/parent/children", h.listChildren)
 	mux.HandleFunc("POST /api/v1/students/{id}/guardians", h.linkToStudent)
 	mux.HandleFunc("GET /api/v1/students/{id}/guardians", h.listForStudent)
+	mux.HandleFunc("PUT /api/v1/guardians/{id}/notification-preferences", h.setNotificationPreferences)
 }
 
 type createGuardianRequest struct {
@@ -142,10 +143,36 @@ func (h *Handlers) listChildren(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": children})
 }
 
+// setNotificationPreferences answers PRD 4.5.2. Authorized for office roles
+// (managing on a family's behalf, e.g. by phone request) or the guardian's
+// own linked account (parent-app self-service) -- verified against the
+// actual row in the repository, not just trusted from the role claim.
+func (h *Handlers) setNotificationPreferences(w http.ResponseWriter, r *http.Request) {
+	guardianID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "invalid guardian id")
+		return
+	}
+	var prefs NotificationPreferences
+	if !decodeJSON(w, r, &prefs) {
+		return
+	}
+	role, _ := tenancy.Role(r.Context())
+	isOffice := role == "correspondent" || role == "office_admin"
+	actorID, _ := tenancy.UserID(r.Context())
+	if err := h.repo.SetNotificationPreferences(r.Context(), guardianID, prefs, actorID, isOffice); err != nil {
+		writeRepoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func writeRepoError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "guardian not found")
+	case errors.Is(err, ErrForbidden):
+		writeError(w, http.StatusForbidden, "forbidden", "not authorized to change this guardian's preferences")
 	case errors.Is(err, db.ErrNoTenant):
 		writeError(w, http.StatusForbidden, "no_tenant", "request is not scoped to a school")
 	default:

@@ -12,7 +12,10 @@ import (
 	"school-erp/backend/internal/tenancy"
 )
 
-var ErrNotFound = errors.New("guardians: not found")
+var (
+	ErrNotFound  = errors.New("guardians: not found")
+	ErrForbidden = errors.New("guardians: not authorized to change this guardian's preferences")
+)
 
 type Repository struct {
 	pool *pgxpool.Pool
@@ -93,9 +96,11 @@ func (r *Repository) Get(ctx context.Context, id uuid.UUID) (Guardian, error) {
 	var out Guardian
 	err := db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
-			SELECT id, name, mobile, email, occupation, created_at
+			SELECT id, name, mobile, email, occupation, created_at,
+			       opt_out_fee_reminders, opt_out_attendance_alerts, opt_out_general_notices, sms_opt_out
 			FROM guardians WHERE id = $1 AND deleted_at IS NULL
-		`, id).Scan(&out.ID, &out.Name, &out.Mobile, &out.Email, &out.Occupation, &out.CreatedAt)
+		`, id).Scan(&out.ID, &out.Name, &out.Mobile, &out.Email, &out.Occupation, &out.CreatedAt,
+			&out.OptOutFeeReminders, &out.OptOutAttendanceAlerts, &out.OptOutGeneralNotices, &out.SMSOptOut)
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -104,6 +109,40 @@ func (r *Repository) Get(ctx context.Context, id uuid.UUID) (Guardian, error) {
 		return Guardian{}, err
 	}
 	return out, nil
+}
+
+// SetNotificationPreferences answers PRD 4.5.2's opt-out/channel-preference
+// requirement. actorUserID is who is allowed to change it -- either an
+// office role (checked by the caller) or the guardian's own linked user_id
+// (self-service from the parent app), verified here directly against the
+// row rather than trusted from the caller, since this is exactly the kind
+// of consent setting a guardian must be able to change themselves without
+// going through the office.
+func (r *Repository) SetNotificationPreferences(ctx context.Context, guardianID uuid.UUID, prefs NotificationPreferences, actorUserID uuid.UUID, actorIsOffice bool) error {
+	return db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		var ownerUserID *uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT user_id FROM guardians WHERE id = $1 AND deleted_at IS NULL`, guardianID).Scan(&ownerUserID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if !actorIsOffice && (ownerUserID == nil || *ownerUserID != actorUserID) {
+			return ErrForbidden
+		}
+		tag, err := tx.Exec(ctx, `
+			UPDATE guardians SET opt_out_fee_reminders = $1, opt_out_attendance_alerts = $2,
+			       opt_out_general_notices = $3, sms_opt_out = $4
+			WHERE id = $5
+		`, prefs.OptOutFeeReminders, prefs.OptOutAttendanceAlerts, prefs.OptOutGeneralNotices, prefs.SMSOptOut, guardianID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
 }
 
 // Child is a student as seen from a parent's own dashboard (PRD 4.8): enough

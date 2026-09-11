@@ -13,6 +13,20 @@ type Guardian struct {
 	Email      *string   `json:"email,omitempty"`
 	Occupation *string   `json:"occupation,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
+	NotificationPreferences
+}
+
+// NotificationPreferences answers PRD 4.5.2: "Per-guardian channel
+// preference and per-category opt-out (fee reminders, attendance, general
+// notices), which is also a DPDP consent requirement." Emergency broadcasts
+// (PRD 4.5.3) are never subject to any of these -- that exemption is
+// enforced where those are sent, not by adding a field here that would
+// invite someone to wire it in by mistake.
+type NotificationPreferences struct {
+	OptOutFeeReminders     bool `json:"opt_out_fee_reminders"`
+	OptOutAttendanceAlerts bool `json:"opt_out_attendance_alerts"`
+	OptOutGeneralNotices   bool `json:"opt_out_general_notices"`
+	SMSOptOut              bool `json:"sms_opt_out"`
 }
 
 type Relationship string

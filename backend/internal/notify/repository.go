@@ -134,6 +134,19 @@ func resolveRecipients(ctx context.Context, tx pgx.Tx, in ComposeInput) ([]recip
 	var rows pgx.Rows
 	var err error
 
+	// PRD 4.5.2: "per-category opt-out (fee reminders, attendance, general
+	// notices), which is also a DPDP consent requirement." "notice" is the
+	// only human-composed kind Compose ever handles (every automated kind --
+	// absence_alert, fee_due_reminder, payment_receipt, etc. -- either goes
+	// through here as TargetStudent for a specific student, like
+	// payment_receipt, or bypasses Compose entirely, like the absence-alert
+	// and fee-reminder scans which check their own category's opt-out
+	// directly). Applying the general-notices opt-out only when kind is
+	// actually "notice" keeps a payment receipt (also TargetStudent) from
+	// being silently filtered by a guardian's *notices* preference, which
+	// would be the wrong category entirely.
+	isGeneralNotice := in.Kind == KindNotice
+
 	switch in.TargetType {
 	case TargetWholeSchool:
 		rows, err = tx.Query(ctx, `
@@ -141,7 +154,8 @@ func resolveRecipients(ctx context.Context, tx pgx.Tx, in ComposeInput) ([]recip
 			FROM student_guardians sg
 			JOIN guardians g ON g.id = sg.guardian_id
 			WHERE g.user_id IS NOT NULL AND sg.deleted_at IS NULL AND g.deleted_at IS NULL
-		`)
+			  AND (NOT $1::boolean OR g.opt_out_general_notices = false)
+		`, isGeneralNotice)
 	case TargetClass:
 		if in.ClassID == nil {
 			return nil, errors.New("class_id is required for a class-targeted notice")
@@ -152,7 +166,8 @@ func resolveRecipients(ctx context.Context, tx pgx.Tx, in ComposeInput) ([]recip
 			JOIN student_guardians sg ON sg.student_id = e.student_id AND sg.deleted_at IS NULL
 			JOIN guardians g ON g.id = sg.guardian_id AND g.deleted_at IS NULL
 			WHERE e.class_id = $1 AND e.deleted_at IS NULL AND g.user_id IS NOT NULL AND upper_inf(e.period)
-		`, *in.ClassID)
+			  AND (NOT $2::boolean OR g.opt_out_general_notices = false)
+		`, *in.ClassID, isGeneralNotice)
 	case TargetSection:
 		if in.SectionID == nil {
 			return nil, errors.New("section_id is required for a section-targeted notice")
@@ -163,7 +178,8 @@ func resolveRecipients(ctx context.Context, tx pgx.Tx, in ComposeInput) ([]recip
 			JOIN student_guardians sg ON sg.student_id = e.student_id AND sg.deleted_at IS NULL
 			JOIN guardians g ON g.id = sg.guardian_id AND g.deleted_at IS NULL
 			WHERE e.section_id = $1 AND e.deleted_at IS NULL AND g.user_id IS NOT NULL AND upper_inf(e.period)
-		`, *in.SectionID)
+			  AND (NOT $2::boolean OR g.opt_out_general_notices = false)
+		`, *in.SectionID, isGeneralNotice)
 	case TargetStudent:
 		if in.StudentID == nil {
 			return nil, errors.New("student_id is required for a student-targeted notice")
@@ -173,7 +189,8 @@ func resolveRecipients(ctx context.Context, tx pgx.Tx, in ComposeInput) ([]recip
 			FROM student_guardians sg
 			JOIN guardians g ON g.id = sg.guardian_id AND g.deleted_at IS NULL
 			WHERE sg.student_id = $1 AND sg.deleted_at IS NULL AND g.user_id IS NOT NULL
-		`, *in.StudentID)
+			  AND (NOT $2::boolean OR g.opt_out_general_notices = false)
+		`, *in.StudentID, isGeneralNotice)
 	case TargetCustom:
 		recipients := make([]recipient, 0, len(in.CustomUserIDs))
 		for _, uid := range in.CustomUserIDs {

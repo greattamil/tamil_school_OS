@@ -119,12 +119,17 @@ func remindOneSchool(ctx context.Context, pool *pgxpool.Pool, schoolID uuid.UUID
 			// own flag precisely because the family may want dues addressed
 			// to whichever parent actually handles money, not necessarily
 			// whoever is the primary point of contact for everything else).
+			// PRD 4.5.2: per-category opt-out is a DPDP consent requirement --
+			// a guardian who has opted out of fee reminders specifically must
+			// never receive one, independent of the quiet-hours/daily-cap
+			// volume controls notify.Compose already enforces elsewhere.
 			var guardianUserID *uuid.UUID
 			if err := tx.QueryRow(ctx, `
 				SELECT g.user_id FROM student_guardians sg
 				JOIN guardians g ON g.id = sg.guardian_id
 				WHERE sg.student_id = $1 AND sg.is_fee_responsible = true
 				  AND sg.deleted_at IS NULL AND g.deleted_at IS NULL
+				  AND g.opt_out_fee_reminders = false
 				LIMIT 1
 			`, c.studentID).Scan(&guardianUserID); err != nil && err != pgx.ErrNoRows {
 				return err

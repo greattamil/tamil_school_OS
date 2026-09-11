@@ -319,6 +319,7 @@ func dispatchAbsenceAlertsHandler(pool *pgxpool.Pool) appjobs.Handler {
 				        JOIN guardians g ON g.id = sg.guardian_id
 				        WHERE sg.student_id = e.student_id AND sg.is_primary_contact = true
 				          AND sg.deleted_at IS NULL AND g.deleted_at IS NULL
+				          AND g.opt_out_attendance_alerts = false
 				        LIMIT 1)
 				FROM attendance_entries ae
 				JOIN enrollments e ON e.id = ae.enrollment_id
