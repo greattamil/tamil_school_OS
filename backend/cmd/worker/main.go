@@ -14,6 +14,7 @@ import (
 	"time"
 
 	appdb "school-erp/backend/internal/db"
+	"school-erp/backend/internal/fees"
 	"school-erp/backend/internal/jobs"
 	"school-erp/backend/internal/notify"
 )
@@ -59,6 +60,15 @@ func run() error {
 	const smsRolloverWindow = 3 * time.Minute
 	smsRolloverTicker := time.NewTicker(30 * time.Second)
 	defer smsRolloverTicker.Stop()
+	// PRD 4.4.5: fee due/overdue reminders. A daily cadence would be the
+	// normal choice for something checking date-based windows, not a fast
+	// ticker -- this shorter interval is deliberately for this session's own
+	// verification convenience (waiting a day to prove it fires is not
+	// practical); nothing about the logic depends on the tick being fast.
+	const feeReminderDueWindow = 3 * 24 * time.Hour
+	const feeReminderOverdueCooldown = 7 * 24 * time.Hour
+	feeReminderTicker := time.NewTicker(1 * time.Minute)
+	defer feeReminderTicker.Stop()
 
 	for {
 		select {
@@ -91,6 +101,15 @@ func run() error {
 			}
 			if n > 0 {
 				log.Printf("worker: sms rollover sent %d message(s)", n)
+			}
+		case <-feeReminderTicker.C:
+			n, err := fees.ScanFeeReminders(ctx, pool, feeReminderDueWindow, feeReminderOverdueCooldown)
+			if err != nil {
+				log.Printf("worker: fee reminder scan: %v", err)
+				continue
+			}
+			if n > 0 {
+				log.Printf("worker: fee reminder scan sent %d reminder(s)", n)
 			}
 		}
 	}

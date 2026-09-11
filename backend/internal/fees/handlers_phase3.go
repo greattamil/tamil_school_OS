@@ -3,12 +3,15 @@ package fees
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
 
 	"school-erp/backend/internal/db"
+	"school-erp/backend/internal/notify"
 	"school-erp/backend/internal/tenancy"
 )
 
@@ -26,6 +29,7 @@ func (h *Handlers) registerPhase3(mux *http.ServeMux) {
 
 	mux.HandleFunc("POST /api/v1/students/{id}/fee-assignment", h.generateAssignment)
 	mux.HandleFunc("GET /api/v1/students/{id}/fee-line-items", h.lineItems)
+	mux.HandleFunc("GET /api/v1/students/{id}/payments", h.paymentsForStudent)
 
 	mux.HandleFunc("POST /api/v1/fees/payments", h.collectPayment)
 	mux.HandleFunc("POST /api/v1/fees/payments/{id}/void", h.voidPayment)
@@ -302,6 +306,20 @@ func (h *Handlers) lineItems(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "credit_balance_paise": credit})
 }
 
+func (h *Handlers) paymentsForStudent(w http.ResponseWriter, r *http.Request) {
+	studentID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "invalid student id")
+		return
+	}
+	items, err := h.repo.PaymentsForStudent(r.Context(), studentID)
+	if err != nil {
+		writeFeesRepoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
 // --- Payments ---
 
 type collectPaymentRequest struct {
@@ -333,6 +351,28 @@ func (h *Handlers) collectPayment(w http.ResponseWriter, r *http.Request) {
 		writeFeesRepoError(w, err)
 		return
 	}
+
+	// PRD 4.5.3: "payment receipt confirmation" as an automated notification
+	// type. Fired synchronously right after the payment commits (there is a
+	// real actor here, unlike the reminder scan), targeting every guardian of
+	// the student (TargetStudent's normal resolution, not just the
+	// fee-responsible one -- a receipt is something every guardian
+	// reasonably wants to see, unlike a due/overdue reminder). Best-effort:
+	// a failure here must never make an already-recorded, already-receipted
+	// payment look like it failed to the clerk at the counter.
+	if h.notifyRepo != nil {
+		body := fmt.Sprintf("Receipt #%d for %s received.", payment.ReceiptNumber, formatPaiseForNotify(payment.AmountPaise))
+		if _, _, err := h.notifyRepo.Compose(r.Context(), notify.ComposeInput{
+			Kind:       notify.KindPaymentReceipt,
+			Title:      "Payment received",
+			BodyEN:     body,
+			TargetType: notify.TargetStudent,
+			StudentID:  &req.StudentID,
+		}, actorID); err != nil {
+			log.Printf("fees: payment receipt notification failed for payment %s: %v", payment.ID, err)
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, payment)
 }
 

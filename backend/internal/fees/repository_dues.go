@@ -115,6 +115,51 @@ func (r *Repository) RealDuesForStudent(ctx context.Context, studentID uuid.UUID
 	return outstandingPaise, creditPaise, oldestDueDate, found, err
 }
 
+// PaymentsForStudent is the receipt history behind a student's dues --
+// what the counter screen needs to let staff act on a specific payment
+// (void, cheque status) rather than just seeing a total.
+func (r *Repository) PaymentsForStudent(ctx context.Context, studentID uuid.UUID) ([]Payment, error) {
+	out := []Payment{}
+	err := db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT id, student_id, receipt_number, mode, amount_paise, allocated_amount_paise,
+			       advance_amount_paise, collected_by, collected_at, cheque_number, cheque_bank,
+			       cheque_status, is_void, void_reason
+			FROM payments WHERE student_id = $1
+			ORDER BY collected_at DESC
+		`, studentID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p Payment
+			var chequeNumber, chequeBank, voidReason *string
+			var chequeStatus *ChequeStatus
+			if err := rows.Scan(&p.ID, &p.StudentID, &p.ReceiptNumber, &p.Mode, &p.AmountPaise, &p.AllocatedAmountPaise,
+				&p.AdvanceAmountPaise, &p.CollectedBy, &p.CollectedAt, &chequeNumber, &chequeBank, &chequeStatus,
+				&p.IsVoid, &voidReason); err != nil {
+				return err
+			}
+			if chequeNumber != nil {
+				p.ChequeNumber = *chequeNumber
+			}
+			if chequeBank != nil {
+				p.ChequeBank = *chequeBank
+			}
+			if chequeStatus != nil {
+				p.ChequeStatus = *chequeStatus
+			}
+			if voidReason != nil {
+				p.VoidReason = *voidReason
+			}
+			out = append(out, p)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
 // CreditBalance returns the student's current unallocated credit (PRD
 // 4.4.3.3: "appears in the dues report as a distinct column, never netted
 // silently into a student's outstanding figure").

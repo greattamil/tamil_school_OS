@@ -7,6 +7,7 @@ import { useAuth } from "@/lib/auth-context";
 const links = [
   { href: "/students", label: "Students" },
   { href: "/import", label: "Bulk import" },
+  { href: "/fees", label: "Fees" },
 ];
 
 export function TopNav() {

@@ -8,15 +8,20 @@ import (
 	"github.com/google/uuid"
 
 	"school-erp/backend/internal/db"
+	"school-erp/backend/internal/notify"
 	"school-erp/backend/internal/tenancy"
 )
 
 type Handlers struct {
-	repo *Repository
+	repo       *Repository
+	notifyRepo *notify.Repository
 }
 
-func NewHandlers(repo *Repository) *Handlers {
-	return &Handlers{repo: repo}
+// notifyRepo is optional -- nil disables the payment-receipt notification
+// (PRD 4.5.3) without disabling anything else in this handler set, so tests
+// or a minimal deployment can wire fees.Handlers without pulling in notify.
+func NewHandlers(repo *Repository, notifyRepo *notify.Repository) *Handlers {
+	return &Handlers{repo: repo, notifyRepo: notifyRepo}
 }
 
 func (h *Handlers) Register(mux *http.ServeMux) {

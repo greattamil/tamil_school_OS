@@ -75,7 +75,7 @@ func run() error {
 	notifyHandlers := notify.NewHandlers(notifyRepo)
 
 	feesRepo := fees.NewRepository(pool)
-	feesHandlers := fees.NewHandlers(feesRepo)
+	feesHandlers := fees.NewHandlers(feesRepo, notifyRepo)
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("GET /healthz", healthHandler(pool))
