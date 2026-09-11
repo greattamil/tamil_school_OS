@@ -121,6 +121,11 @@ class _ParentDashboardScreenState extends ConsumerState<ParentDashboardScreen> {
                           setState(() => _selectedStudentId = v);
                           await _loadChildDetail(session.accessToken);
                         },
+                      )
+                    else
+                      Text(
+                        _children.first['name_english'] as String,
+                        style: Theme.of(context).textTheme.headlineSmall,
                       ),
                     const SizedBox(height: 16),
                     _card(
