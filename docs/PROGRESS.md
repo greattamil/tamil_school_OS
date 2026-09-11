@@ -478,14 +478,56 @@ configuration/collection is not built yet (see "Not built" below).
   (`go test -tags=integration ./test/...`) both pass after all of the above,
   the latter confirming every new table is RLS-covered.
 
-### Not built, and why -- read before treating Phase 3 as done
+### Admin panel UI -- built in a later session than the backend above
 
-- **No admin-panel UI.** Everything above is a working, verified backend API.
-  A correspondent or office admin cannot yet do any of this through the
-  Next.js admin panel -- there is no fee-configuration screen, no payment-
-  collection counter screen, no cash-drawer-closing screen. This is the
-  single largest remaining gap before a real school could use Phase 3 at
-  all; the backend being correct doesn't help a clerk with no UI to click.
+The gap flagged below as "the single largest remaining gap" is closed:
+`admin-panel/src/app/fees/` now has a working screen for every backend
+capability above -- `/fees` (dues/ageing + student search), `/fees/students/
+[id]` (the actual daily-use counter screen: generate a demand, view line
+items, collect a cash/cheque payment with allocation across specific dues
+plus the advance/credit split, void, refund from credit, cheque status
+transitions including the bounce return-charge prompt, and concessions
+including the sibling-dependency flow), `/fees/config` (heads and versioned
+structures, correspondent-only), `/fees/concessions` (the review-required
+worklist with continue/cancel/convert), `/fees/cash-drawer` (the full
+blind-count/recount/close flow), `/fees/annexure` (the regulatory export
+with CSV download). Role-gated throughout per the PRD 2.2 matrix.
+
+`npm run build` and `npm run lint` both pass, and every route was confirmed
+reachable (200) with the dev server running. **What this does not claim**:
+no browser-automation tool was available in this environment, so no page was
+actually click-tested end-to-end in a real browser -- no form was submitted,
+no real API round-trip was watched happen from the UI. The backend behind
+every one of these screens was independently verified for real (see above);
+the screens themselves are unverified beyond compiling, linting, and
+rendering their initial HTML shell. Treat this UI as needing a real
+first-use pass by an actual person before relying on it at a real school.
+
+### Fee event notifications -- built in the same later session
+
+`payment_receipt`, `fee_due_reminder` and `fee_overdue_reminder` (PRD 4.5.3)
+are now wired, not just valid enum values waiting for a caller:
+- Payment receipts fire synchronously from `CollectPayment` via the existing
+  `notify.Compose`, targeting every guardian of the student.
+- Due/overdue reminders run from a new `fees.ScanFeeReminders`, ticked from
+  `cmd/worker` alongside the existing scans, looped per-school under real
+  tenant context from the start (applying the RLS lesson from earlier in
+  this phase proactively rather than rediscovering it a third time). New
+  `due_reminder_sent_at`/`overdue_reminder_sent_at` columns (migration
+  000017) mean a due-soon reminder fires once and an overdue one repeats on
+  a 7-day cooldown, not every tick.
+- Both inherit the quiet-hours/daily-cap discipline automatically, with zero
+  new enforcement code -- verified directly: a receipt notification to a
+  guardian who'd already hit today's cap from earlier testing correctly
+  deferred, then dispatched once the cap was raised.
+- Verified against real data: a real payment produced a real notification to
+  the correct guardian; one real worker tick produced exactly the two
+  genuinely-qualifying reminders present in the data (one overdue, one
+  due-soon), correctly worded and targeted, with every scanned line item
+  marked so re-scanning won't duplicate them.
+
+### Not built, and why -- read before treating Phase 3 as fully done
+
 - **No real payment gateway integration**, and this is not a code gap:
   PRD 9 (Phase 1, week 1) calls out gateway onboarding as an external
   business process requiring the school's own documentation, which nothing
@@ -509,14 +551,6 @@ configuration/collection is not built yet (see "Not built" below).
   collected through the API today has no printable receipt output at all --
   only the JSON record. This needs real printer/format access before it's
   worth building.
-- **No SMS/push notification wired to fee events yet.** `fee_due_reminder`,
-  `fee_overdue_reminder` and `payment_receipt` are already valid
-  `notify.Kind` values (Phase 2) and the quiet-hours/daily-cap discipline
-  built this session applies to them automatically the moment something
-  calls `Compose` with one -- but nothing in the fees module calls it yet.
-  Automated reminders (PRD 4.4.5) and payment-receipt notifications are a
-  straightforward next slice: wire `fees.CollectPayment`/the ageing report
-  to `notify.Repository.Compose`, no new mechanism needed.
 - **Gateway settlement reconciliation** (PRD 4.4.6: "match gateway payouts
   against recorded payments and flag discrepancies") depends on having a
   real gateway account to reconcile against -- not buildable until the
