@@ -539,6 +539,37 @@ are now wired, not just valid enum values waiting for a caller:
   due-soon), correctly worded and targeted, with every scanned line item
   marked so re-scanning won't duplicate them.
 
+### A real Phase 2 gap found and closed in a later session, before starting Phase 4
+
+Audited this file against the PRD rather than assuming its own "done" claims
+were complete, per an explicit request to close real gaps before moving on.
+Found one: **PRD 4.5.2 requires "per-guardian channel preference and
+per-category opt-out (fee reminders, attendance, general notices), which is
+also a DPDP consent requirement"** -- never built. The message-discipline
+work earlier this phase (quiet hours, the daily cap) governs volume, not
+consent; those are different requirements and neither one satisfies the
+other.
+
+- Migration 000018: four columns on `guardians` (`opt_out_fee_reminders`,
+  `opt_out_attendance_alerts`, `opt_out_general_notices`, `sms_opt_out`).
+- Enforced at the three actual notification-creation points: general
+  notices in `notify.resolveRecipients` (scoped specifically to
+  `kind == "notice"`, so it doesn't wrongly filter `payment_receipt`, which
+  also targets a single student via the same code path), the absence-alert
+  primary-guardian lookup, and the fee-reminder scan's fee-responsible-
+  guardian lookup. Emergency broadcasts remain exempt from all of it, per
+  PRD 4.5.3's own explicit exemption.
+- New `PUT /api/v1/guardians/{id}/notification-preferences`, authorized for
+  office roles or the guardian's own linked account (self-service),
+  verified against the actual row rather than trusted from the role claim.
+- Verified on real data across all three categories: opting a guardian out
+  of fee reminders zeroed that exact lookup query; opting out of general
+  notices made a real `Compose` call resolve to zero recipients and get
+  rejected, while a `payment_receipt` to the same guardian was confirmed
+  *not* wrongly filtered by that opt-out; opting out of attendance alerts
+  zeroed the primary-guardian lookup. Preferences restored to default
+  (opted-in) afterward.
+
 ### Not built, and why -- read before treating Phase 3 as fully done
 
 - **No real payment gateway integration**, and this is not a code gap:
@@ -551,10 +582,25 @@ are now wired, not just valid enum values waiting for a caller:
   itself: "a bare UPI deep link to a plain VPA gives the school no
   server-side notification... Confirm what the school's bank actually
   offers before designing around this." No school's actual bank capability
-  is known yet. The honest fallback PRD 4.4.3.1 names -- a link plus a
-  parent-submitted UTR the office verifies manually -- is not built either;
-  it's a small feature and should be picked up once a real school is
-  onboarded and its bank's actual capability (or lack of it) is confirmed.
+  is known yet -- this specific piece stays not-built until one is.
+
+  **The honest fallback PRD 4.4.3.1 names in the same breath -- "a link plus
+  a parent-submitted UTR that the office verifies against the bank
+  statement" -- is now built** (a later session; PRD explicitly frames this
+  as buildable without bank/gateway confirmation, unlike the reconciliation
+  path above): `upi_payment_requests` (migration 000019), a real
+  `upi://pay` intent link with declared allocations up front, a
+  `pending -> utr_submitted -> verified/rejected` lifecycle, and verification
+  replaying the declared allocations into a real `CollectPayment` call the
+  moment an office human confirms the UTR against the bank statement.
+  `fee_settings.upi_vpa` unset means request creation refuses outright
+  rather than emitting a link to nowhere -- no school has a real VPA
+  configured in this codebase yet, so this is the expected state until one
+  does. Verified end-to-end with a real VPA configured: refused cleanly
+  before configuration, then a full pending -> submitted -> verified cycle
+  produced a real receipt and correctly paid off the covered line item;
+  verifying before a UTR was submitted was correctly rejected; rejecting a
+  request correctly left no payment behind.
 - **No thermal ESC/POS receipt printing, and no PDF receipt generation.**
   PRD 4.4.3.3 is explicit this is "a specific engineering task, not a CSS
   afterthought" requiring testing against the school's actual physical
