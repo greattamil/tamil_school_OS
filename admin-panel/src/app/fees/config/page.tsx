@@ -220,6 +220,10 @@ function FeeStructuresSection({
   const [pending, setPending] = useState(false);
 
   useEffect(() => {
+    // Defaulting the class picker to the first loaded class, same pattern
+    // (and same lint exception) as the year picker on the parent page and
+    // the mount-fetch effects elsewhere in this codebase.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (classes.length > 0 && !classId) setClassId(classes[0].id);
   }, [classes, classId]);
 

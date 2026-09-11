@@ -324,13 +324,23 @@ function PaymentRow({
 }) {
   const { accessToken } = useAuth();
   const [busy, setBusy] = useState(false);
+  // No window.prompt/confirm -- this app runs in an environment where native
+  // browser dialogs are unavailable (confirmed by a real runtime error), so
+  // void and the bounce return-charge decision are inline panels instead.
+  const [panel, setPanel] = useState<"none" | "void" | "bounce">("none");
+  const [voidReason, setVoidReason] = useState("");
+  const [waiverNote, setWaiverNote] = useState("");
 
-  async function onVoid() {
-    const reason = window.prompt("Reason for voiding this receipt (required):");
-    if (!reason) return;
+  async function submitVoid() {
+    if (!voidReason.trim()) {
+      onError("A reason is required to void this receipt.");
+      return;
+    }
     setBusy(true);
     try {
-      await voidPayment(accessToken, payment.id, reason);
+      await voidPayment(accessToken, payment.id, voidReason);
+      setPanel("none");
+      setVoidReason("");
       onChanged();
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Could not void this payment.");
@@ -340,15 +350,13 @@ function PaymentRow({
   }
 
   async function onChequeTransition(status: ChequeStatus) {
-    let addReturnCharge = false;
-    let waiverNote = "";
     if (status === "bounced") {
-      addReturnCharge = window.confirm("Add the configured cheque return charge to this student's dues?");
-      if (!addReturnCharge) waiverNote = window.prompt("Note for waiving the return charge:") ?? "";
+      setPanel("bounce");
+      return;
     }
     setBusy(true);
     try {
-      await setChequeStatus(accessToken, payment.id, status, addReturnCharge, waiverNote);
+      await setChequeStatus(accessToken, payment.id, status, false, "");
       onChanged();
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Could not update cheque status.");
@@ -357,54 +365,119 @@ function PaymentRow({
     }
   }
 
+  async function submitBounce(addReturnCharge: boolean) {
+    setBusy(true);
+    try {
+      await setChequeStatus(accessToken, payment.id, "bounced", addReturnCharge, addReturnCharge ? "" : waiverNote);
+      setPanel("none");
+      setWaiverNote("");
+      onChanged();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Could not mark this cheque bounced.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <tr className={payment.is_void ? "opacity-50" : ""}>
-      <td className="px-3 py-2 font-medium">
-        #{payment.receipt_number}
-        {payment.is_void && <span className="ml-1 text-xs text-red-600">VOID</span>}
-      </td>
-      <td className="px-3 py-2 text-zinc-500">{payment.collected_at.slice(0, 10)}</td>
-      <td className="px-3 py-2 capitalize">{payment.mode}</td>
-      <td className="px-3 py-2 text-right">{formatPaise(payment.amount_paise)}</td>
-      <td className="px-3 py-2">
-        {payment.cheque_status ? (
-          <span className="capitalize">{payment.cheque_status}</span>
-        ) : (
-          <span className="text-zinc-300">—</span>
-        )}
-      </td>
-      <td className="px-3 py-2 text-right">
-        {!payment.is_void && (
-          <div className="flex justify-end gap-2">
-            {canCollect && payment.mode === "cheque" && payment.cheque_status === "received" && (
-              <button disabled={busy} onClick={() => onChequeTransition("deposited")} className="text-xs text-zinc-500 hover:text-zinc-800">
-                Mark deposited
-              </button>
-            )}
-            {canCollect && payment.mode === "cheque" && payment.cheque_status === "deposited" && (
-              <>
-                <button disabled={busy} onClick={() => onChequeTransition("cleared")} className="text-xs text-emerald-600 hover:text-emerald-800">
-                  Mark cleared
+    <>
+      <tr className={payment.is_void ? "opacity-50" : ""}>
+        <td className="px-3 py-2 font-medium">
+          #{payment.receipt_number}
+          {payment.is_void && <span className="ml-1 text-xs text-red-600">VOID</span>}
+        </td>
+        <td className="px-3 py-2 text-zinc-500">{payment.collected_at.slice(0, 10)}</td>
+        <td className="px-3 py-2 capitalize">{payment.mode}</td>
+        <td className="px-3 py-2 text-right">{formatPaise(payment.amount_paise)}</td>
+        <td className="px-3 py-2">
+          {payment.cheque_status ? (
+            <span className="capitalize">{payment.cheque_status}</span>
+          ) : (
+            <span className="text-zinc-300">—</span>
+          )}
+        </td>
+        <td className="px-3 py-2 text-right">
+          {!payment.is_void && (
+            <div className="flex justify-end gap-2">
+              {canCollect && payment.mode === "cheque" && payment.cheque_status === "received" && (
+                <button disabled={busy} onClick={() => onChequeTransition("deposited")} className="text-xs text-zinc-500 hover:text-zinc-800">
+                  Mark deposited
                 </button>
+              )}
+              {canCollect && payment.mode === "cheque" && payment.cheque_status === "deposited" && (
+                <>
+                  <button disabled={busy} onClick={() => onChequeTransition("cleared")} className="text-xs text-emerald-600 hover:text-emerald-800">
+                    Mark cleared
+                  </button>
+                  <button disabled={busy} onClick={() => onChequeTransition("bounced")} className="text-xs text-red-600 hover:text-red-800">
+                    Mark bounced
+                  </button>
+                </>
+              )}
+              {canCollect && payment.mode === "cheque" && payment.cheque_status === "received" && (
                 <button disabled={busy} onClick={() => onChequeTransition("bounced")} className="text-xs text-red-600 hover:text-red-800">
                   Mark bounced
                 </button>
-              </>
-            )}
-            {canCollect && payment.mode === "cheque" && payment.cheque_status === "received" && (
-              <button disabled={busy} onClick={() => onChequeTransition("bounced")} className="text-xs text-red-600 hover:text-red-800">
-                Mark bounced
+              )}
+              {canVoidRefund && (
+                <button disabled={busy} onClick={() => setPanel(panel === "void" ? "none" : "void")} className="text-xs text-red-600 hover:text-red-800">
+                  Void
+                </button>
+              )}
+            </div>
+          )}
+        </td>
+      </tr>
+      {panel === "void" && (
+        <tr>
+          <td colSpan={6} className="bg-red-50 px-3 py-2">
+            <div className="flex items-center gap-2">
+              <input
+                autoFocus
+                placeholder="Reason for voiding this receipt (required)"
+                value={voidReason}
+                onChange={(e) => setVoidReason(e.target.value)}
+                className="flex-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+              />
+              <button disabled={busy} onClick={submitVoid} className="rounded-md bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50">
+                {busy ? "Voiding…" : "Confirm void"}
               </button>
-            )}
-            {canVoidRefund && (
-              <button disabled={busy} onClick={onVoid} className="text-xs text-red-600 hover:text-red-800">
-                Void
+              <button onClick={() => setPanel("none")} className="text-xs text-zinc-500 hover:text-zinc-700">
+                Cancel
               </button>
-            )}
-          </div>
-        )}
-      </td>
-    </tr>
+            </div>
+          </td>
+        </tr>
+      )}
+      {panel === "bounce" && (
+        <tr>
+          <td colSpan={6} className="bg-red-50 px-3 py-2">
+            <p className="text-xs font-medium text-zinc-700">Mark this cheque bounced. Add the configured return charge to the student&apos;s dues?</p>
+            <div className="mt-1 flex items-center gap-2">
+              <button disabled={busy} onClick={() => submitBounce(true)} className="rounded-md bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50">
+                {busy ? "Saving…" : "Yes, add return charge"}
+              </button>
+              <input
+                placeholder="Note for waiving the charge instead"
+                value={waiverNote}
+                onChange={(e) => setWaiverNote(e.target.value)}
+                className="flex-1 rounded-md border border-zinc-300 px-2 py-1 text-sm"
+              />
+              <button
+                disabled={busy || !waiverNote.trim()}
+                onClick={() => submitBounce(false)}
+                className="rounded-md border border-zinc-300 px-2 py-1 text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+              >
+                Waive, no charge
+              </button>
+              <button onClick={() => setPanel("none")} className="text-xs text-zinc-500 hover:text-zinc-700">
+                Cancel
+              </button>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 
@@ -740,7 +813,7 @@ function ConcessionsPanel({
           </div>
           {type === "sibling" && (
             <div>
-              <label className="block text-sm font-medium text-zinc-700">Elder sibling's student ID</label>
+              <label className="block text-sm font-medium text-zinc-700">Elder sibling&apos;s student ID</label>
               <input
                 value={elderStudentId}
                 onChange={(e) => setElderStudentId(e.target.value)}
