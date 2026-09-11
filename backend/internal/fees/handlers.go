@@ -23,6 +23,7 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/fees/dues/import", h.importCSV)
 	mux.HandleFunc("GET /api/v1/fees/dues", h.list)
 	mux.HandleFunc("GET /api/v1/students/{id}/dues", h.forStudent)
+	h.registerPhase3(mux)
 }
 
 func (h *Handlers) importCSV(w http.ResponseWriter, r *http.Request) {
@@ -55,12 +56,34 @@ func (h *Handlers) list(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+// forStudent prefers the real Phase 3 ledger over the Phase 2
+// fee_dues_snapshot import the moment a student has any real fee_assignment
+// -- otherwise a school that's moved onto the real fee engine would keep
+// showing parents a stale snapshot nobody is re-importing anymore. Falls
+// back to the snapshot only when the student has no real assignment at all.
 func (h *Handlers) forStudent(w http.ResponseWriter, r *http.Request) {
 	studentID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_id", "invalid student id")
 		return
 	}
+
+	outstanding, credit, oldestDue, found, err := h.repo.RealDuesForStudent(r.Context(), studentID)
+	if err != nil {
+		writeRepoError(w, err)
+		return
+	}
+	if found {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"student_id":               studentID,
+			"outstanding_amount_paise": outstanding,
+			"credit_balance_paise":     credit,
+			"due_date":                 oldestDue,
+			"source":                   "ledger",
+		})
+		return
+	}
+
 	snapshot, err := h.repo.ForStudent(r.Context(), studentID)
 	if err != nil {
 		writeRepoError(w, err)

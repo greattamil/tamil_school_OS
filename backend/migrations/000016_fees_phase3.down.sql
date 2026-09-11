@@ -1,0 +1,24 @@
+DROP TABLE IF EXISTS fee_settings;
+DROP TABLE IF EXISTS cash_drawer_recount_attempts;
+DROP TABLE IF EXISTS cash_drawer_closings;
+DROP TYPE IF EXISTS cash_drawer_status;
+DROP TABLE IF EXISTS webhook_events; -- RLS policy/enable drop is implicit with the table
+DROP TABLE IF EXISTS refunds;
+DROP TABLE IF EXISTS credit_balance_transactions;
+DROP TYPE IF EXISTS credit_transaction_reason;
+DROP TABLE IF EXISTS student_credit_balances;
+DROP TABLE IF EXISTS payment_allocations;
+DROP TABLE IF EXISTS fee_receipt_sequences;
+DROP TABLE IF EXISTS payments;
+DROP TYPE IF EXISTS cheque_status;
+DROP TYPE IF EXISTS payment_mode;
+DROP TABLE IF EXISTS fee_line_items;
+DROP TYPE IF EXISTS fee_line_item_status;
+DROP TABLE IF EXISTS fee_assignments;
+DROP TABLE IF EXISTS concessions;
+DROP TYPE IF EXISTS concession_status;
+DROP TYPE IF EXISTS concession_type;
+DROP TABLE IF EXISTS fee_structure_instalments;
+DROP TABLE IF EXISTS fee_structures;
+DROP TABLE IF EXISTS fee_heads;
+DROP TYPE IF EXISTS fee_statutory_category;

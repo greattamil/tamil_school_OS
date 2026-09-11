@@ -326,7 +326,209 @@ convenience only -- see below).
   first (this codebase's push dispatch is still `LogDispatcher`, no real
   Firebase project wired), so the ack call has something to attach to.
 
-## Phase 3+
+## Phase 3 — Fees (weeks 10-14 target)
 
-Not started. See PRD section 9 (full fee engine, exams/report cards,
-certificates, dashboards, class diary).
+PRD 4.4 opens with "This module carries the highest trust risk in the
+product. Every requirement here is a correctness requirement" -- everything
+below was built and then verified against the live Docker stack with real
+data and real curl calls, not just compiled, specifically because of that
+sentence. Backend only in this pass; the admin-panel UI for fee
+configuration/collection is not built yet (see "Not built" below).
+
+### Backend: done and verified in Docker
+
+- **Fee structure configuration** (`internal/fees`, migration 000016): fee
+  heads per academic year with the fixed statutory-category enumeration
+  (PRD 4.4.1), versioned fee structures per class+year (`is_active`
+  enforced unique per class+year by a partial unique index, not just
+  application discipline) with an instalment schedule (head, label, amount,
+  due date) per version. Changing a structure creates a new version and
+  deactivates the old one; existing `fee_assignments` keep pointing at
+  whichever version they were generated from, so a later edit never
+  retroactively alters an issued demand -- verified by generating a
+  demand, then confirming its line items still reference the original
+  structure version.
+- **Concessions with the PRD's sibling/staff-ward dependency tracking**,
+  which the PRD spends real space on because both "continue silently" and
+  "cancel automatically" are explicitly wrong: a concession keyed to an
+  elder sibling's `student_id` (never `enrollment_id`, for the exact reason
+  the PRD gives -- enrollments close every June at promotion). The
+  dependency is checked at the moment a fee demand is next generated for the
+  younger child (PRD's own phrasing), flips the concession to
+  `review_required`, and blocks generation with the specific concession(s)
+  in the error until the office makes an explicit continue/cancel/convert
+  decision. **A real bug found and fixed here**: the status-flip and the
+  blocked generation attempt were originally one transaction, so the abort
+  that blocked generation also rolled back the flip -- meaning the office's
+  review worklist stayed silently empty despite the office having just been
+  told a concession needed attention. Fixed by committing the flip in its
+  own transaction before the generation attempt runs at all. Verified
+  end-to-end: created a sibling concession, ended the elder's enrollment,
+  confirmed generation blocked *and* the concession showed up in the review
+  worklist, resolved it as cancelled, confirmed generation then succeeded at
+  full (un-discounted) amount.
+- **Fee assignment generation** (PRD 4.4.2): resolves the student's
+  enrollment for the year, finds the class's active structure, applies every
+  currently-active concession per instalment (percentage concessions
+  computed against gross and stacked additively, flat concessions drawn down
+  from a running per-concession pool across instalments of the same head,
+  both capped so concessions can never take net below zero), writes the
+  dated `fee_line_items`. Verified with a real 10%-off-tuition-only merit
+  concession: transport instalments came out at full gross, tuition
+  instalments at exactly 90%.
+- **Payment collection** (PRD 4.4.3): cash and cheque entry, receipt numbers
+  assigned via an atomic `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`
+  counter (never two collectors racing to the same number), allocation
+  across specific line items with partial-payment support, and the
+  overpayment/advance split (PRD 4.4.3.3) landing in a
+  `student_credit_balances` running balance plus an append-only
+  `credit_balance_transactions` ledger. Verified: a ₹20,000 cash payment
+  against an ₹18,000 tuition instalment correctly split ₹18,000 allocated /
+  ₹2,000 credited, with the line item flipping to `paid` and the credit
+  balance showing separately (never netted into the outstanding figure, per
+  PRD 4.4.3.3's explicit requirement) in the dues report.
+- **A real Postgres semantics bug found and fixed in the credit-balance
+  upsert**: `INSERT ... ON CONFLICT DO UPDATE` validates CHECK constraints
+  against the `VALUES`-list candidate row even when the conflict path (the
+  `UPDATE`) is what actually runs -- confirmed directly: a negative delta
+  against an existing row with ample balance aborted with a check-constraint
+  violation even though the *update* itself would have produced a valid
+  balance. Fixed by wrapping the `VALUES` clause's candidate value in
+  `GREATEST(0, $delta)` (the `UPDATE` branch's arithmetic is unaffected and
+  still correct); documented in the code as a real semantics gotcha, not
+  just a workaround, since a fresh row starting from a negative delta with
+  nothing to debit yet would be a bug regardless.
+- **Void and refunds** (PRD 4.4.4): void requires a mandatory reason,
+  reverses the payment's line-item and credit effects, never deletes the
+  payment or reuses its receipt number (the row stays, `is_void=true`).
+  Refunds draw from the student's credit balance (PRD 4.4.3.3: "Credit is
+  refundable, subject to the same authority and audit rules as any refund"),
+  rejected cleanly if requested beyond the available balance. Voiding a
+  cash payment whose business day has been closed is blocked (see cash
+  drawer below). **A real bug found and fixed**: voiding an already-bounced
+  cheque payment tried to reverse the line items a second time (the bounce
+  had already reversed them once), driving `paid_amount_paise` negative and
+  hitting its own CHECK constraint. Fixed by having void recognize a
+  bounced-cheque payment's effects are already reversed and skip re-reversing
+  them, only recording the void itself.
+- **Cheque lifecycle** (PRD 4.4.3.3): received -> deposited -> cleared, or
+  -> bounced from either prior state, enforced as a real transition table,
+  not just accepting any value. A bounced cheque reinstates the dues it had
+  covered and optionally (per-instance, per the PRD) adds a configurable
+  cheque-return-charge line item, defaulting from `fee_settings` and
+  auditable including when waived. Verified: a bounced cheque correctly put
+  its transport instalment back to `pending` and added a real ₹250
+  "Cheque Return Charge" line item to the student's dues.
+- **Day-end cash drawer closing, PRD 4.4.6.1 in full**: blind count (the
+  clerk's denomination breakdown is recorded *before* the expected total,
+  computed from that collector's actual cash receipts for the day, is
+  revealed), up to two recounts, a third attempt with a variance beyond
+  tolerance rejected outright (without consuming the attempt) unless
+  submitted together with a written explanation, and closing freezes every
+  matching cash payment against further void/back-dated correction. Verified
+  every rule directly: an exact-match count closed cleanly; a mismatched
+  count exercised attempt 1 -> attempt 2 (recount) -> attempt 3 rejected
+  without an explanation -> attempt 3 accepted with one -> a 4th attempt
+  hard-blocked; closing a drawer and then attempting to void one of its
+  payments was correctly rejected with "this payment's business day is
+  closed."
+- **Real-time dues and ageing** (PRD 4.4.5): computed live from
+  `fee_line_items`/`student_credit_balances` on every call, never a cached
+  total -- a void or a bounced cheque is reflected the instant it happens.
+  Credit balance shown as its own column, never netted into the outstanding
+  figure. The parent-facing `GET /api/v1/students/{id}/dues` endpoint (used
+  by the mobile app since Phase 2) now prefers this real ledger the moment a
+  student has any real `fee_assignment`, falling back to the Phase 2
+  `fee_dues_snapshot` import only when they don't -- verified both paths on
+  real students, including the pure-fallback case for a student with no
+  assignment at all.
+- **Regulatory export** (PRD 4.4.7): `GET /api/v1/fees/annexure` aggregates
+  gross/concession/net/collected by statutory category for the state fee
+  determination committee filing, a live query rather than a manual
+  reclassification exercise, exactly per the PRD's own framing of why
+  categorization happens at fee-head definition time. RTE tracked as a
+  distinct category on `fee_assignments` (`is_rte` +
+  `rte_reimbursement_status`) with a dedicated listing endpoint.
+- **Webhook ingestion pipeline** (PRD 4.4.3.2): `webhook_events`, idempotency
+  enforced by a real `UNIQUE(school_id, provider, idempotency_key)`
+  constraint (not an application check), verified directly -- the identical
+  payload sent twice produced exactly one row and a 200 both times, so a
+  retrying provider stops retrying without ever being processed twice. **This
+  table is correctly RLS-protected** (unlike `jobs`): a payment gateway is
+  registered per school (PRD 4.4.3: "in the school's name"), so its webhook
+  URL carries the school as a path segment and real tenant context is set
+  before the row is ever written -- there's no cross-school ambiguity to
+  justify the `jobs`-style exception here. The cross-tenant integration
+  suite's `TestEveryTenantTableHasRLSPolicy` caught the first draft of this
+  table missing that (it was written with the `jobs` reasoning applied
+  somewhere it didn't actually fit) before it ever reached Docker.
+- **UPI intent link generation** (PRD 4.4.3.1): the `upi://pay?...` deep
+  link format with a unique per-demand reference. This is the whole of what
+  PRD 4.4.3.1 itself says is buildable without external confirmation --
+  see "Not built" below for why automatic reconciliation isn't.
+- **A second RLS bug of the exact same shape, found proactively this time**:
+  while building the webhook endpoint, the instinct was to reuse the `jobs`
+  table's "no tenant context, no RLS" pattern, since a webhook also arrives
+  outside any request-scoped context. Recognizing that a gateway is
+  per-school (unlike the genuinely cross-school absence-notification scan
+  fixed earlier this same session) avoided writing that bug into new code
+  instead of just fixing the one already found -- worth recording as the
+  actual lesson from that earlier bug, not just its fix.
+- `go test ./...` and the cross-tenant isolation suite
+  (`go test -tags=integration ./test/...`) both pass after all of the above,
+  the latter confirming every new table is RLS-covered.
+
+### Not built, and why -- read before treating Phase 3 as done
+
+- **No admin-panel UI.** Everything above is a working, verified backend API.
+  A correspondent or office admin cannot yet do any of this through the
+  Next.js admin panel -- there is no fee-configuration screen, no payment-
+  collection counter screen, no cash-drawer-closing screen. This is the
+  single largest remaining gap before a real school could use Phase 3 at
+  all; the backend being correct doesn't help a clerk with no UI to click.
+- **No real payment gateway integration**, and this is not a code gap:
+  PRD 9 (Phase 1, week 1) calls out gateway onboarding as an external
+  business process requiring the school's own documentation, which nothing
+  in this codebase can perform. `LogGatewayVerifier` accepts any webhook
+  payload's signature unconditionally and is explicitly a stand-in, the
+  same pattern as `notify.LogDispatcher`/`LogSMSSender`.
+- **No automatic UPI reconciliation**, for the reason PRD 4.4.3.1 states
+  itself: "a bare UPI deep link to a plain VPA gives the school no
+  server-side notification... Confirm what the school's bank actually
+  offers before designing around this." No school's actual bank capability
+  is known yet. The honest fallback PRD 4.4.3.1 names -- a link plus a
+  parent-submitted UTR the office verifies manually -- is not built either;
+  it's a small feature and should be picked up once a real school is
+  onboarded and its bank's actual capability (or lack of it) is confirmed.
+- **No thermal ESC/POS receipt printing, and no PDF receipt generation.**
+  PRD 4.4.3.3 is explicit this is "a specific engineering task, not a CSS
+  afterthought" requiring testing against the school's actual physical
+  printer -- genuinely impossible from here. Rather than write ESC/POS
+  byte-sequence code that has never been run against real hardware and
+  call that "done," nothing was written for either format. A payment
+  collected through the API today has no printable receipt output at all --
+  only the JSON record. This needs real printer/format access before it's
+  worth building.
+- **No SMS/push notification wired to fee events yet.** `fee_due_reminder`,
+  `fee_overdue_reminder` and `payment_receipt` are already valid
+  `notify.Kind` values (Phase 2) and the quiet-hours/daily-cap discipline
+  built this session applies to them automatically the moment something
+  calls `Compose` with one -- but nothing in the fees module calls it yet.
+  Automated reminders (PRD 4.4.5) and payment-receipt notifications are a
+  straightforward next slice: wire `fees.CollectPayment`/the ageing report
+  to `notify.Repository.Compose`, no new mechanism needed.
+- **Gateway settlement reconciliation** (PRD 4.4.6: "match gateway payouts
+  against recorded payments and flag discrepancies") depends on having a
+  real gateway account to reconcile against -- not buildable until the
+  gateway onboarding above happens.
+- **Day-End Closing Voucher is structured data, not a generated document.**
+  `CloseDrawer`'s response has everything the PRD's voucher needs (counted/
+  expected/variance, denomination breakdown, the collector, the date) but
+  nothing renders it as a signable PDF/printout yet -- same underlying gap
+  as the receipt formats above (no PDF pipeline in this codebase at all
+  yet).
+
+## Phase 4+
+
+Not started. See PRD section 9 (exams/report cards, certificates,
+dashboards, class diary, timetable).

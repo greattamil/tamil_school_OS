@@ -79,6 +79,7 @@ func run() error {
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("GET /healthz", healthHandler(pool))
+	fees.RegisterWebhookRoutes(rootMux, feesRepo, fees.LogGatewayVerifier{})
 	authHandlers.Register(rootMux)
 
 	protectedMux := http.NewServeMux()
