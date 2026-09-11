@@ -23,6 +23,7 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/notices", h.compose)
 	mux.HandleFunc("GET /api/v1/notices", h.inbox)
 	mux.HandleFunc("POST /api/v1/notices/{id}/read", h.markRead)
+	mux.HandleFunc("POST /api/v1/notices/{id}/ack", h.ack)
 	mux.HandleFunc("POST /api/v1/device-tokens", h.registerToken)
 }
 
@@ -56,13 +57,45 @@ func (h *Handlers) compose(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing_fields", "kind, title, body_en and target_type are required")
 		return
 	}
-	// Class teachers may only reach their own section (PRD 2.2 role matrix);
-	// enforcing exactly which section is "their own" requires the
-	// section_teachers assignment, deferred here -- reject whole-school/class
-	// targeting from a teacher role as the safe subset of that rule for now.
-	if role == "teacher" && req.TargetType != TargetSection && req.TargetType != TargetStudent {
-		writeError(w, http.StatusForbidden, "forbidden", "class teachers may only send to their own section or an individual student")
-		return
+	// Teachers may only reach a section (or a student within one) they are
+	// actually assigned to teach (PRD 2.2 role matrix: "class teacher ...
+	// sends notices to their section"), verified against section_teachers --
+	// not just rejecting whole-school/class targeting as a role-level proxy.
+	if role == "teacher" {
+		actorID, _ := tenancy.UserID(r.Context())
+		switch req.TargetType {
+		case TargetSection:
+			if req.SectionID == nil {
+				writeError(w, http.StatusBadRequest, "missing_fields", "section_id is required")
+				return
+			}
+			owns, err := h.repo.TeacherOwnsSection(r.Context(), actorID, *req.SectionID)
+			if err != nil {
+				writeRepoError(w, err)
+				return
+			}
+			if !owns {
+				writeError(w, http.StatusForbidden, "forbidden", "not assigned to this section")
+				return
+			}
+		case TargetStudent:
+			if req.StudentID == nil {
+				writeError(w, http.StatusBadRequest, "missing_fields", "student_id is required")
+				return
+			}
+			owns, err := h.repo.TeacherOwnsStudent(r.Context(), actorID, *req.StudentID)
+			if err != nil {
+				writeRepoError(w, err)
+				return
+			}
+			if !owns {
+				writeError(w, http.StatusForbidden, "forbidden", "not assigned to this student's section")
+				return
+			}
+		default:
+			writeError(w, http.StatusForbidden, "forbidden", "class teachers may only send to their own section or a student in it")
+			return
+		}
 	}
 	if req.IsEmergency && role != "correspondent" && role != "office_admin" {
 		writeError(w, http.StatusForbidden, "forbidden", "emergency broadcasts are restricted to correspondent and office admin")
@@ -100,6 +133,24 @@ func (h *Handlers) markRead(w http.ResponseWriter, r *http.Request) {
 	}
 	userID, _ := tenancy.UserID(r.Context())
 	if err := h.repo.MarkRead(r.Context(), userID, notificationID); err != nil {
+		writeRepoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// ack records that the recipient's device actually received a push (PRD 4.5.3:
+// the SMS-rollover window is measured from this, not from push_sent_at, which
+// only proves FCM accepted the send). Called by the mobile client's FCM
+// background-message handler the moment a push arrives.
+func (h *Handlers) ack(w http.ResponseWriter, r *http.Request) {
+	notificationID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "invalid notification id")
+		return
+	}
+	userID, _ := tenancy.UserID(r.Context())
+	if err := h.repo.AckPush(r.Context(), userID, notificationID); err != nil {
 		writeRepoError(w, err)
 		return
 	}

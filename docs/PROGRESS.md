@@ -169,12 +169,14 @@ convenience only -- see below).
   surfacing the caught error in the UI rather than guessing from logs, which
   is what actually revealed the `StateError` (this back-and-forth, and the
   Android emulator's storage running out mid-session while trying to close
-  the loop with a fresh install, is why this fix landed without a final
-  post-fix on-device re-run -- it's implemented and reasoned through against
-  Drift's own documented isolate-scoping behavior and the
-  sqlcipher_flutter_libs README's explicit warning about this exact case,
-  but the very last "empty roster now shows real students on a real device"
-  screenshot is still owed). Fixed by passing `isolateSetup:` to
+  the loop with a fresh install, is why this fix initially landed without a
+  final post-fix on-device re-run -- it was implemented and reasoned through
+  against Drift's own documented isolate-scoping behavior and the
+  sqlcipher_flutter_libs README's explicit warning about this exact case.
+  **Since confirmed on a real device in a later session**: logged in as a
+  real teacher account, opened a section's attendance screen, and the full
+  real roster (five real students fetched from the server) rendered
+  correctly -- the fix holds). Fixed by passing `isolateSetup:` to
   `NativeDatabase.createInBackground`, which Drift runs once inside the new
   isolate before any query -- re-applying the same override there closes the
   gap. Also turned the screen's silent `.catchError` into a real (if
@@ -195,39 +197,134 @@ convenience only -- see below).
   requires the local database always be encrypted, only
   `sqlcipher_flutter_libs` is needed; its SQLCipher build is ABI-compatible
   with plain sqlite3, so nothing is lost by not depending on both.
+- **A second real on-device bug, found and fixed in that later session**: the
+  attendance confirm-and-sync flow wrote locally (outbox correctly queued 5
+  pending entries) but the network sync silently never completed -- the app
+  showed "N pending" forever with no error anywhere, because
+  `attendance_screen.dart`'s sync-failure handler was a bare `catch (_) {}`.
+  Root cause, found by temporarily surfacing the caught error in the UI (same
+  technique as the isolate bug above): Drift's SQLite round-trip loses the
+  UTC flag on `DateTime` columns -- the value read back is always
+  `isUtc: false` even though it was written from `.toUtc()` -- so
+  `clientTimestamp.toIso8601String()` in the sync payload omitted the `Z`
+  suffix, and the backend's RFC3339 `time.Parse` rejected every sync request
+  with a 400. Fixed by forcing `.toUtc()` again immediately before formatting
+  in `attendance_repository.dart`. Verified for real: marked a student
+  absent on-device, tapped confirm, and watched the server's own
+  `server_revision` actually increment for that exact student. Also: two
+  release-build-only bugs found and fixed along the way that would have
+  blocked any real distribution regardless of this one -- `INTERNET`
+  permission was only in Flutter's debug-only manifest (missing from real
+  release builds), and no network security config existed to permit the
+  local dev backend's cleartext HTTP (blocked by default at this target SDK
+  level in every build type, not just release).
 - **Not yet done**: period-wise/half-day attendance (PRD 4.2.1 mentions it as
-  school-configurable; this pass only does whole-day), marks entry (Phase 4
-  per the PRD's own module scope, not missing from Phase 2), the pending-
-  register-older-than-24-hours warning (PRD 4.2.5), and the
-  battery-optimization-exemption onboarding prompt (PRD 4.2.5) -- all
-  reasonable follow-ups once the core sync mechanism (done) is exercised on
-  a real device over multiple days. Also owed: a fresh on-device run to
-  visually confirm the isolateSetup fix above (blocked mid-session by the
-  shared emulator running out of storage, not by anything in the fix
-  itself).
+  school-configurable; this pass only does whole-day), and marks entry
+  (Phase 4 per the PRD's own module scope, not missing from Phase 2).
+  Battery-optimization-exemption prompt and the pending-register-older-than-
+  24-hours warning (both PRD 4.2.5) are being closed out in this same
+  session -- see below rather than listed as outstanding twice.
 - **CI now covers mobile too**: added a `mobile` job to
   `.github/workflows/backend-ci.yml` (`flutter analyze` + `flutter test`,
   the in-memory-database suite -- no emulator needed for that, so it's a
   normal fast CI job, not something blocked by the storage issue above).
   The workflow's display name changed from `backend-ci` to `ci` to match.
 
-### Backend: not yet started
+### Phase 2 gaps closed in this session -- all verified live in Docker, not just compiled
+
+- **Quiet hours enforced** (PRD 4.5.4): `dispatchNotificationHandler` now checks
+  `school_settings.quiet_hours_start/end` for every automated (non-`notice`,
+  non-emergency) notification before sending, and defers rather than drops --
+  it re-enqueues the same dispatch job at the moment quiet hours end (a new
+  `EnqueueTxAt` job-package helper using the `jobs.run_after` column that
+  already existed for exactly this). Verified by temporarily narrowing a real
+  school's quiet-hours window to include the current time, composing an
+  automated notification, and confirming in Postgres that a new job appeared
+  with `run_after` set to the window's end and `push_sent_at` stayed null.
+- **Daily automated-message cap enforced** (PRD 4.5.4, default 3/guardian/day):
+  checked per-recipient at send time against today's already-sent count for
+  non-notice, non-emergency notifications; the in-app notification row is
+  still created regardless (delivery/read tracking is per-recipient per PRD
+  4.5.1 -- the cap governs push/SMS noise, not in-app visibility). Verified by
+  sending four automated notices to the same guardian with the cap set to 3:
+  the first three set `push_sent_at`, the fourth did not.
+- **Class-teacher section-targeting actually verified, not role-proxied**: the
+  previous "reject whole-school/class from teacher role" placeholder is
+  replaced with a real `section_teachers` lookup (`Repository.TeacherOwnsSection`/
+  `TeacherOwnsStudent`, scoped to the active academic year). Verified with a
+  real teacher account assigned to one section: composing to their own section
+  succeeds, composing to a second section they're not assigned to returns 403
+  `not assigned to this section`, and whole-school/class targeting from that
+  role is still rejected outright.
+- **SMS rollover for emergency broadcasts** (PRD 4.5.3): a new `SMSSender`
+  interface (real telecom-API call stubbed as `LogSMSSender`, same pattern as
+  `Dispatcher`/`LogDispatcher`) plus `ScanSMSRollover`, ticked every 30s from
+  `cmd/worker`, finds emergency-broadcast recipients whose push was sent but
+  not acknowledged within 3 minutes and sends the `EMERGENCY_HOLIDAY`-template
+  fallback. A new `POST /api/v1/notices/{id}/ack` endpoint records the
+  acknowledgment the mobile client's FCM handler is expected to call (mobile
+  side not wired yet -- see below). Verified by composing an emergency
+  broadcast, backdating `push_sent_at` past the window, and confirming
+  `sms_sent_at` was set by the real worker process.
+- **The `academic_calendar_days` entity now exists** (PRD 3.1: migration
+  000015, `day_type` enum `regular_working/holiday/compensatory_working/
+  half_day/exam_day`, RLS-protected, `PUT`/`GET /api/v1/academic-calendar`
+  for the office to set and amend it). `AttendancePercentage` and
+  `AttendancePercentageForStudent` now compute their denominator from working
+  calendar days in range rather than counting recorded entries, so a
+  retroactively-declared holiday correctly stops counting against a student
+  even though its attendance entries are preserved (PRD 3.1's own example) --
+  and recomputation is automatic since the calendar table is read live on
+  every call, no cached total to invalidate. Falls back to the previous
+  entry-count method only when a school has configured zero calendar days in
+  the requested range, so a school that hasn't set up its calendar yet still
+  gets *a* percentage rather than a false 0/0. Verified against real data: a
+  student present on the one day with a recorded register, across a 5-working-
+  day range with one of those days retroactively marked a holiday, correctly
+  showed 1/4 (25%) -- not the 100% the old entry-count method would have shown,
+  and not counting the holiday.
+- **A second, more serious bug found while building the above, unrelated to
+  any of it**: `ScanAbsenceNotifications` -- the absence-notification scan
+  previously marked "Verified end-to-end in Docker" in this same file -- runs
+  with no tenant context by design (it has to look across every school at
+  once), and queried `attendance_entries`/`school_settings` directly with a
+  plain `pool.Query`. Both are RLS-protected tenant tables, and this worker's
+  pool connects as `app_user`, which per PRD 6.1 point 6 never gets
+  `BYPASSRLS`. With no `app.current_school_id` set, Postgres's RLS policy
+  (`school_id = current_school_id()`) evaluates `current_school_id()` as NULL
+  and silently returns **zero rows on every school, with no error** -- meaning
+  this scan could never have found a single school in real operation, ever.
+  Confirmed directly: `psql -U app_user` with no tenant context set returned
+  `count(*) = 0` against tables holding real rows. (The earlier "verified"
+  note in this file was evidently exercising the fan-out/dispatch side with a
+  job enqueued directly, not the scan query itself finding the school on its
+  own -- worth remembering as a lesson: verify the *trigger*, not just what
+  happens once triggered.) Fixed the same way `ScanSMSRollover` had to be
+  built from the start: loop every school (from the global, non-RLS `schools`
+  table) and check each under its own real tenant context via
+  `db.WithTenantTx`, exactly like `dispatchAbsenceAlertsHandler` and
+  `dispatchNotificationHandler` already did correctly for their own per-school
+  work. Verified for real this time: marked a student absent, waited for the
+  worker's real 1-minute scan tick (not a manually-enqueued job), and watched
+  `absence_notified_at` actually get set.
+- The backend's own `go test ./...` and the cross-tenant isolation suite
+  (`go test -tags=integration ./test/...` -- `TestDirectIDAccessAcrossTenants
+  ReturnsNothing`, `TestConcurrentPoolDoesNotLeakTenantContext`,
+  `TestEveryTenantTableHasRLSPolicy`) both pass after these changes, the
+  latter confirming `academic_calendar_days` carries the RLS policy the new
+  migration adds.
+
+### Backend: still not started
 
 - Class diary is Phase 4 per the PRD, not Phase 2 -- not started, correctly.
-- SMS rollover for undelivered push (PRD 4.5.3's emergency-broadcast
-  requirement) is not implemented; the dispatch pipeline has the hook points
-  (`push_acknowledged_at`, `sms_sent_at` columns exist) but nothing populates
-  them yet.
-- Quiet hours and the daily-message cap (`school_settings` columns exist) are
-  not enforced anywhere yet -- notices send immediately regardless of time of
-  day or how many the recipient already received today.
-- Class-teacher notice targeting is restricted to "their own section" only in
-  the sense of rejecting whole-school/class targets from that role; it does
-  not yet verify the teacher is actually assigned to the section they're
-  targeting (needs `section_teachers` to be consulted, not just role-checked).
-- The academic_calendar_days entity (PRD 3.1) still doesn't exist, so
-  attendance-percentage figures remain a known simplification (documented in
-  `attendance/reporting.go`) -- not safe to print on a TC yet.
+- The mobile app's FCM background-message handler doesn't yet call the new
+  `POST /api/v1/notices/{id}/ack` endpoint -- the backend half of SMS
+  rollover (scan, send, mark) is real and verified above, but nothing on the
+  device reports a push arriving yet, so in real operation every push would
+  currently look "unacknowledged" and roll over to SMS after 3 minutes even
+  when the app received it fine. Needs the mobile FCM integration itself
+  first (this codebase's push dispatch is still `LogDispatcher`, no real
+  Firebase project wired), so the ack call has something to attach to.
 
 ## Phase 3+
 

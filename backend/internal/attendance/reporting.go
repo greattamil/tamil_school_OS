@@ -74,23 +74,43 @@ func (r *Repository) DailySummary(ctx context.Context, sectionID *uuid.UUID, dat
 	return out, err
 }
 
+// workingDayTypes lists the calendar_day_type values attendance is expected to
+// be taken on (PRD 3.1). Kept as a literal array here rather than importing the
+// academic package's DayType enum -- attendance and academic are peer modules
+// with no dependency between them, and this list is a SQL-level fact (which
+// enum values count as "working"), not behavior worth a Go-level coupling for.
+var workingDayTypes = []string{"regular_working", "compensatory_working", "half_day", "exam_day"}
+
 // AttendancePercentage answers PRD 4.2.4: "Per-student attendance percentage over
 // a date range."
 //
-// Known simplification, tracked in docs/PROGRESS.md: this counts days with a
-// recorded attendance entry as the working-day denominator, rather than resolving
-// against the academic_calendar_days entity PRD 3.1 specifies (explicit
-// day_type per date: regular_working / holiday / compensatory_working / etc).
-// That entity does not exist yet. Today's calculation is at least immune to the
-// worst version of the bug PRD 3.1 warns about (a Monday-to-Friday weekday
-// assumption), because a date with no attendance entry recorded simply isn't
-// counted -- but it is NOT yet correct for a retroactively-declared holiday
-// whose attendance entries were preserved rather than deleted (PRD 3.1: "excluded
-// from totals rather than deleted"), since nothing here knows to exclude them.
-// This must be revisited before the figure is trusted on a TC or official
-// register export.
+// Denominator is the count of academic_calendar_days rows in range classified as
+// a working day type (PRD 3.1), not a recorded-entry count -- so a retroactively
+// declared holiday is excluded from totals even though its attendance entries are
+// preserved rather than deleted (PRD 3.1's own example), and recomputation is
+// automatic on every call since this reads the calendar table live rather than a
+// cached total.
+//
+// Falls back to counting recorded entries (the previous behavior) only when the
+// school has not configured any calendar rows at all in range -- a school that
+// hasn't set up its calendar yet should see *a* percentage, not a false 0%/0
+// from an empty working-day denominator.
 func (r *Repository) AttendancePercentage(ctx context.Context, enrollmentID uuid.UUID, from, to time.Time) (presentDays, totalDays int, err error) {
 	err = db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		var calendarConfigured bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM academic_calendar_days WHERE date BETWEEN $1 AND $2)`, from, to).Scan(&calendarConfigured); err != nil {
+			return err
+		}
+		if calendarConfigured {
+			return tx.QueryRow(ctx, `
+				SELECT
+				  (SELECT count(*) FROM attendance_entries ae
+				   JOIN academic_calendar_days acd ON acd.date = ae.date
+				   WHERE ae.enrollment_id = $1 AND ae.status = 'present' AND ae.deleted_at IS NULL
+				     AND acd.date BETWEEN $2 AND $3 AND acd.day_type = ANY($4)),
+				  (SELECT count(*) FROM academic_calendar_days WHERE date BETWEEN $2 AND $3 AND day_type = ANY($4))
+			`, enrollmentID, from, to, workingDayTypes).Scan(&presentDays, &totalDays)
+		}
 		return tx.QueryRow(ctx, `
 			SELECT count(*) FILTER (WHERE status = 'present'), count(*)
 			FROM attendance_entries
@@ -107,9 +127,25 @@ func (r *Repository) AttendancePercentage(ctx context.Context, enrollmentID uuid
 // figure instead of a partial one scoped to whichever enrollment happened to be
 // active when the query was written (PRD 3.3: history stays attached to the
 // enrollment that was active when it was recorded, but a student's own summary
-// should still read across all of it).
+// should still read across all of it). Same calendar-based denominator and
+// no-calendar-configured fallback as AttendancePercentage.
 func (r *Repository) AttendancePercentageForStudent(ctx context.Context, studentID uuid.UUID, from, to time.Time) (presentDays, totalDays int, err error) {
 	err = db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		var calendarConfigured bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM academic_calendar_days WHERE date BETWEEN $1 AND $2)`, from, to).Scan(&calendarConfigured); err != nil {
+			return err
+		}
+		if calendarConfigured {
+			return tx.QueryRow(ctx, `
+				SELECT
+				  (SELECT count(*) FROM attendance_entries ae
+				   JOIN enrollments e ON e.id = ae.enrollment_id
+				   JOIN academic_calendar_days acd ON acd.date = ae.date
+				   WHERE e.student_id = $1 AND ae.status = 'present' AND ae.deleted_at IS NULL
+				     AND acd.date BETWEEN $2 AND $3 AND acd.day_type = ANY($4)),
+				  (SELECT count(*) FROM academic_calendar_days WHERE date BETWEEN $2 AND $3 AND day_type = ANY($4))
+			`, studentID, from, to, workingDayTypes).Scan(&presentDays, &totalDays)
+		}
 		return tx.QueryRow(ctx, `
 			SELECT count(*) FILTER (WHERE ae.status = 'present'), count(*)
 			FROM attendance_entries ae

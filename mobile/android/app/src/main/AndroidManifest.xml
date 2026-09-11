@@ -39,6 +39,11 @@
          HTTP calls in debug builds too. It grants nothing in release, where
          this is the only permission making network access possible at all. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Lets the direct one-tap battery-optimization-exemption prompt (PRD
+         4.2.5) work without first navigating the user through a settings
+         list; MainActivity.kt falls back to the general settings screen if
+         an OEM ROM blocks this intent regardless. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
          https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.

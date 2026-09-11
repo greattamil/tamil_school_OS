@@ -35,3 +35,30 @@ type Section struct {
 	ClassID uuid.UUID `json:"class_id"`
 	Name    string    `json:"name"`
 }
+
+// DayType is PRD 3.1's academic_calendar_days classification: "All working-day
+// totals, attendance percentages and register exports compute from these rows,
+// never from the calendar week."
+type DayType string
+
+const (
+	DayRegularWorking      DayType = "regular_working"
+	DayHoliday             DayType = "holiday"
+	DayCompensatoryWorking DayType = "compensatory_working"
+	DayHalf                DayType = "half_day"
+	DayExam                DayType = "exam_day"
+)
+
+// IsWorking reports whether attendance is expected to be taken on a day of this
+// type -- used both to build the working-day denominator for percentages and,
+// eventually, to gate whether the mobile app's section list even shows a
+// register-taking action for a given date.
+func (d DayType) IsWorking() bool {
+	return d == DayRegularWorking || d == DayCompensatoryWorking || d == DayHalf || d == DayExam
+}
+
+type CalendarDay struct {
+	Date    time.Time `json:"date"`
+	DayType DayType   `json:"day_type"`
+	Note    string    `json:"note,omitempty"`
+}

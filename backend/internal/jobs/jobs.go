@@ -49,6 +49,19 @@ func Enqueue(ctx context.Context, pool *pgxpool.Pool, kind string, payload any) 
 	return err
 }
 
+// EnqueueTxAt is EnqueueTx with an explicit run_after, for a job that must not be
+// claimed before a specific time (PRD 4.5.4: a quiet-hours-deferred notification
+// re-enqueues itself for the moment quiet hours end, rather than being claimed --
+// and immediately re-deferred -- on every worker poll in between).
+func EnqueueTxAt(ctx context.Context, tx pgx.Tx, kind string, payload any, runAfter time.Time) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal job payload: %w", err)
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO jobs (kind, payload, run_after) VALUES ($1, $2, $3)`, kind, body, runAfter)
+	return err
+}
+
 type Handler func(ctx context.Context, job Job) error
 
 // Worker claims and processes jobs with SELECT ... FOR UPDATE SKIP LOCKED (PRD

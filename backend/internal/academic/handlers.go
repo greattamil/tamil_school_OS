@@ -28,6 +28,8 @@ func (h *Handlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/classes", h.listClasses)
 	mux.HandleFunc("POST /api/v1/sections", h.createSection)
 	mux.HandleFunc("GET /api/v1/sections", h.listSections)
+	mux.HandleFunc("PUT /api/v1/academic-calendar", h.setCalendarDays)
+	mux.HandleFunc("GET /api/v1/academic-calendar", h.listCalendarDays)
 }
 
 type createYearRequest struct {
@@ -176,6 +178,71 @@ func (h *Handlers) listSections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": sections})
+}
+
+type setCalendarDaysRequest struct {
+	Days []struct {
+		Date    string  `json:"date"`
+		DayType DayType `json:"day_type"`
+		Note    string  `json:"note"`
+	} `json:"days"`
+}
+
+// setCalendarDays upserts the day_type for one or more dates in a single call
+// (PRD 3.1: setting a year's calendar up front is naturally many dates at once;
+// amending a single declared holiday later is the len==1 case of the same call).
+func (h *Handlers) setCalendarDays(w http.ResponseWriter, r *http.Request) {
+	role, _ := tenancy.Role(r.Context())
+	if role != "correspondent" && role != "office_admin" {
+		writeError(w, http.StatusForbidden, "forbidden", "only correspondent or office admin may set the academic calendar")
+		return
+	}
+
+	var req setCalendarDaysRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.Days) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_body", "days must not be empty")
+		return
+	}
+	days := make([]CalendarDay, len(req.Days))
+	for i, d := range req.Days {
+		date, err := time.Parse("2006-01-02", d.Date)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_date", "each date must be YYYY-MM-DD")
+			return
+		}
+		switch d.DayType {
+		case DayRegularWorking, DayHoliday, DayCompensatoryWorking, DayHalf, DayExam:
+		default:
+			writeError(w, http.StatusBadRequest, "invalid_day_type", "unrecognized day_type")
+			return
+		}
+		days[i] = CalendarDay{Date: date, DayType: d.DayType, Note: d.Note}
+	}
+
+	actorID, _ := tenancy.UserID(r.Context())
+	if err := h.repo.SetCalendarDays(r.Context(), days, actorID); err != nil {
+		writeRepoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handlers) listCalendarDays(w http.ResponseWriter, r *http.Request) {
+	from, err1 := time.Parse("2006-01-02", r.URL.Query().Get("from"))
+	to, err2 := time.Parse("2006-01-02", r.URL.Query().Get("to"))
+	if err1 != nil || err2 != nil {
+		writeError(w, http.StatusBadRequest, "invalid_range", "from and to (YYYY-MM-DD) are required")
+		return
+	}
+	days, err := h.repo.ListCalendarDays(r.Context(), from, to)
+	if err != nil {
+		writeRepoError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": days})
 }
 
 func writeRepoError(w http.ResponseWriter, err error) {

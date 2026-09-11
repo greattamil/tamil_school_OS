@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/power/battery_optimization_service.dart';
 import '../../core/providers.dart';
 import '../attendance/attendance_screen.dart';
 
@@ -27,10 +28,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   bool _loading = true;
   String? _error;
 
+  final _battery = BatteryOptimizationService();
+  bool _showBatteryPrompt = false;
+
   @override
   void initState() {
     super.initState();
     _loadYears();
+    _checkBatteryOptimization();
+  }
+
+  // PRD 4.2.5: "Onboarding tells teachers to exempt the app from battery
+  // optimisation, with a one-tap prompt to the OEM setting." Checked (not
+  // just shown once at install) because OEMs let the user re-enable
+  // optimization later, and a teacher who did that should see the prompt
+  // again next time they open the app, not just on first install.
+  Future<void> _checkBatteryOptimization() async {
+    final exempted = await _battery.isIgnoringBatteryOptimizations();
+    if (mounted && !exempted) setState(() => _showBatteryPrompt = true);
   }
 
   Future<void> _loadYears() async {
@@ -79,7 +94,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
     setState(() {
       _sections = (body['items'] as List<dynamic>).cast<Map<String, dynamic>>();
-      _sectionId = _sections.isNotEmpty ? _sections.first['id'] as String : null;
+      _sectionId = _sections.isNotEmpty
+          ? _sections.first['id'] as String
+          : null;
     });
   }
 
@@ -105,7 +122,51 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  if (_error != null) Text(_error!, style: const TextStyle(color: Colors.red)),
+                  if (_showBatteryPrompt) ...[
+                    Card(
+                      color: Theme.of(context).colorScheme.secondaryContainer,
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Allow this app to run in the background so attendance '
+                              'syncs even if your phone tries to save battery by '
+                              'pausing the app.',
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.end,
+                              children: [
+                                TextButton(
+                                  onPressed: () => setState(
+                                    () => _showBatteryPrompt = false,
+                                  ),
+                                  child: const Text('Skip'),
+                                ),
+                                const SizedBox(width: 8),
+                                FilledButton(
+                                  onPressed: () async {
+                                    await _battery.requestExemption();
+                                    if (mounted) {
+                                      setState(
+                                        () => _showBatteryPrompt = false,
+                                      );
+                                    }
+                                  },
+                                  child: const Text('Allow'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                  ],
+                  if (_error != null)
+                    Text(_error!, style: const TextStyle(color: Colors.red)),
                   _dropdown('Academic year', _years, _yearId, (v) {
                     setState(() => _yearId = v);
                     _loadClasses();

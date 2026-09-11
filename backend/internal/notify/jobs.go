@@ -40,11 +40,53 @@ func dispatchNotificationHandler(pool *pgxpool.Pool, dispatcher Dispatcher) appj
 		}
 		ctx = tenancy.WithSchoolID(ctx, p.SchoolID)
 
-		var title, bodyEN string
+		var title, bodyEN, kind string
+		var isEmergency bool
 		if err := db.WithTenantTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT title, body_en FROM notifications WHERE id = $1`, p.NotificationID).Scan(&title, &bodyEN)
+			return tx.QueryRow(ctx, `SELECT title, body_en, kind, is_emergency FROM notifications WHERE id = $1`, p.NotificationID).
+				Scan(&title, &bodyEN, &kind, &isEmergency)
 		}); err != nil {
 			return fmt.Errorf("load notification: %w", err)
+		}
+
+		// PRD 4.5.3/4.5.4: emergency broadcasts bypass quiet hours and frequency
+		// caps entirely -- the only message class permitted to. "notice" is the
+		// only human-composed kind (every other kind is system-generated), so
+		// the "automated notification" message-discipline rules in 4.5.4 apply
+		// to everything except it.
+		automated := !isEmergency && kind != string(KindNotice)
+
+		if automated {
+			var inQuietHours bool
+			var nextAllowed time.Time
+			var maxDaily int
+			if err := db.WithTenantTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+				return tx.QueryRow(ctx, `
+					SELECT
+					  CASE WHEN quiet_hours_start <= quiet_hours_end
+					       THEN (now() AT TIME ZONE 'Asia/Kolkata')::time >= quiet_hours_start
+					            AND (now() AT TIME ZONE 'Asia/Kolkata')::time < quiet_hours_end
+					       ELSE (now() AT TIME ZONE 'Asia/Kolkata')::time >= quiet_hours_start
+					            OR (now() AT TIME ZONE 'Asia/Kolkata')::time < quiet_hours_end
+					  END,
+					  ((((now() AT TIME ZONE 'Asia/Kolkata')::date
+					      + CASE WHEN (now() AT TIME ZONE 'Asia/Kolkata')::time < quiet_hours_end THEN 0 ELSE 1 END
+					    ) + quiet_hours_end) AT TIME ZONE 'Asia/Kolkata'),
+					  max_daily_automated_messages
+					FROM school_settings WHERE school_id = $1
+				`, p.SchoolID).Scan(&inQuietHours, &nextAllowed, &maxDaily)
+			}); err != nil {
+				return fmt.Errorf("load school_settings for quiet hours: %w", err)
+			}
+
+			if inQuietHours {
+				// Defer rather than drop: re-enqueue the same dispatch for the
+				// moment quiet hours end, and let this claim complete as done --
+				// it has been fully "handled" by scheduling its replacement.
+				return db.WithTenantTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+					return appjobs.EnqueueTxAt(ctx, tx, "dispatch_notification", p, nextAllowed)
+				})
+			}
 		}
 
 		type recipientToken struct {
@@ -75,19 +117,72 @@ func dispatchNotificationHandler(pool *pgxpool.Pool, dispatcher Dispatcher) appj
 			return fmt.Errorf("load recipient tokens: %w", err)
 		}
 
+		// PRD 4.5.4: cap automated pushes per guardian per day. The in-app
+		// notification row always exists regardless (per-recipient delivery/read
+		// tracking, PRD 4.5.1) -- the cap governs push/SMS noise, not visibility.
+		overCap := map[uuid.UUID]bool{}
+		if automated && len(recipientTokens) > 0 {
+			var maxDaily int
+			if err := db.WithTenantTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+				return tx.QueryRow(ctx, `SELECT max_daily_automated_messages FROM school_settings WHERE school_id = $1`, p.SchoolID).Scan(&maxDaily)
+			}); err != nil {
+				return fmt.Errorf("load max_daily_automated_messages: %w", err)
+			}
+			userIDs := make([]uuid.UUID, len(recipientTokens))
+			for i, rt := range recipientTokens {
+				userIDs[i] = rt.recipientUserID
+			}
+			if err := db.WithTenantTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+				rows, err := tx.Query(ctx, `
+					SELECT nr.user_id, count(*)
+					FROM notification_recipients nr
+					JOIN notifications n ON n.id = nr.notification_id
+					WHERE nr.user_id = ANY($1) AND n.kind != 'notice' AND n.is_emergency = false
+					  AND nr.push_sent_at IS NOT NULL
+					  AND (nr.push_sent_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+					GROUP BY nr.user_id
+				`, userIDs)
+				if err != nil {
+					return err
+				}
+				defer rows.Close()
+				for rows.Next() {
+					var uid uuid.UUID
+					var count int
+					if err := rows.Scan(&uid, &count); err != nil {
+						return err
+					}
+					if count >= maxDaily {
+						overCap[uid] = true
+					}
+				}
+				return rows.Err()
+			}); err != nil {
+				return fmt.Errorf("load daily automated-message counts: %w", err)
+			}
+		}
+
 		const batchSize = 500
 		for start := 0; start < len(recipientTokens); start += batchSize {
 			end := min(start+batchSize, len(recipientTokens))
 			batch := recipientTokens[start:end]
-			tokens := make([]string, len(batch))
-			for i, rt := range batch {
-				tokens[i] = rt.token
+			var tokens []string
+			var sendable []recipientToken
+			for _, rt := range batch {
+				if overCap[rt.recipientUserID] {
+					continue
+				}
+				tokens = append(tokens, rt.token)
+				sendable = append(sendable, rt)
+			}
+			if len(tokens) == 0 {
+				continue
 			}
 
 			results := dispatcher.SendMulticast(ctx, tokens, title, bodyEN)
 
 			for i, res := range results {
-				rt := batch[i]
+				rt := sendable[i]
 				if res.Sent {
 					_ = db.WithTenantTx(ctx, pool, func(ctx context.Context, tx pgx.Tx) error {
 						_, err := tx.Exec(ctx, `
@@ -120,34 +215,45 @@ func dispatchNotificationHandler(pool *pgxpool.Pool, dispatcher Dispatcher) appj
 // every school, which is why it queries school_settings and attendance_entries
 // directly rather than going through db.WithTenantTx.
 func ScanAbsenceNotifications(ctx context.Context, pool *pgxpool.Pool) (int, error) {
-	rows, err := pool.Query(ctx, `
-		SELECT DISTINCT ae.school_id
-		FROM attendance_entries ae
-		JOIN school_settings ss ON ss.school_id = ae.school_id
-		WHERE ae.status = 'absent'
-		  AND ae.absence_notified_at IS NULL
-		  AND ae.date = (now() AT TIME ZONE 'Asia/Kolkata')::date
-		  AND (now() AT TIME ZONE 'Asia/Kolkata')::time >= ss.absence_notification_time
-	`)
+	allSchoolIDs, err := activeSchoolIDs(ctx, pool)
 	if err != nil {
 		return 0, fmt.Errorf("scan schools for absence notification: %w", err)
 	}
-	var schoolIDs []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return 0, err
+
+	// attendance_entries and school_settings are both RLS-protected tenant
+	// tables (PRD 6.1), and this worker's pool connects as app_user, which
+	// never gets BYPASSRLS (PRD 6.1 point 6) -- so this cannot be one
+	// cross-school query with no tenant context set (that would silently see
+	// zero rows on every school, not an error, which is what made this
+	// exact bug invisible until traced with a direct app_user query). Loop
+	// every school instead, checking each under its own tenant context, same
+	// as dispatchAbsenceAlertsHandler and dispatchNotificationHandler already
+	// do correctly for their own per-school work.
+	var matched []uuid.UUID
+	for _, schoolID := range allSchoolIDs {
+		sctx := tenancy.WithSchoolID(ctx, schoolID)
+		var hasUnnotified bool
+		if err := db.WithTenantTx(sctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1
+					FROM attendance_entries ae, school_settings ss
+					WHERE ae.status = 'absent'
+					  AND ae.absence_notified_at IS NULL
+					  AND ae.date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+					  AND (now() AT TIME ZONE 'Asia/Kolkata')::time >= ss.absence_notification_time
+				)
+			`).Scan(&hasUnnotified)
+		}); err != nil {
+			return 0, fmt.Errorf("check absence notification for school %s: %w", schoolID, err)
 		}
-		schoolIDs = append(schoolIDs, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, err
+		if hasUnnotified {
+			matched = append(matched, schoolID)
+		}
 	}
 
 	today := time.Now().In(time.FixedZone("IST", 5*3600+30*60)).Format("2006-01-02")
-	for _, schoolID := range schoolIDs {
+	for _, schoolID := range matched {
 		if err := appjobs.Enqueue(ctx, pool, "dispatch_absence_alerts", map[string]any{
 			"school_id": schoolID,
 			"date":      today,
@@ -155,7 +261,28 @@ func ScanAbsenceNotifications(ctx context.Context, pool *pgxpool.Pool) (int, err
 			return 0, fmt.Errorf("enqueue absence alerts for school %s: %w", schoolID, err)
 		}
 	}
-	return len(schoolIDs), nil
+	return len(matched), nil
+}
+
+// activeSchoolIDs lists every non-deleted school. schools itself carries no
+// school_id and is not RLS-protected (PRD 3.2.1: identity/tenant-registry
+// tables sit outside the tenant boundary), so this is safe to query with no
+// tenant context -- unlike the tenant tables the per-school loops above touch.
+func activeSchoolIDs(ctx context.Context, pool *pgxpool.Pool) ([]uuid.UUID, error) {
+	rows, err := pool.Query(ctx, `SELECT id FROM schools WHERE deleted_at IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 type dispatchAbsenceAlertsPayload struct {
@@ -249,4 +376,89 @@ func dispatchAbsenceAlertsHandler(pool *pgxpool.Pool) appjobs.Handler {
 
 		return nil
 	}
+}
+
+// ScanSMSRollover implements PRD 4.5.3's automatic SMS rollover: any recipient of
+// an emergency broadcast whose push was sent but not acknowledged within window
+// gets a fallback SMS. Scoped to is_emergency = true only -- routine notices and
+// automated notifications don't get this treatment, per PRD 4.5.3's own framing
+// ("this is the only message type permitted to" bypass quiet hours/caps; the SMS
+// rollover sits in the same emergency-only paragraph). Runs with no tenant
+// context, like ScanAbsenceNotifications, since it deliberately looks across
+// every school; users.mobile is a global (non-RLS) column so it can be read here
+// directly.
+func ScanSMSRollover(ctx context.Context, pool *pgxpool.Pool, sender SMSSender, window time.Duration) (int, error) {
+	allSchoolIDs, err := activeSchoolIDs(ctx, pool)
+	if err != nil {
+		return 0, fmt.Errorf("scan for sms rollover: %w", err)
+	}
+
+	type candidate struct {
+		recipientID    uuid.UUID
+		schoolID       uuid.UUID
+		notificationID uuid.UUID
+		mobile         string
+		title          string
+	}
+	var candidates []candidate
+
+	// notification_recipients and notifications are RLS-protected tenant
+	// tables (PRD 6.1); the worker's pool has no BYPASSRLS (PRD 6.1 point 6).
+	// A single cross-school query with no tenant context set would silently
+	// match zero rows on every school rather than error -- the same class of
+	// bug traced (via a direct app_user query showing 0 rows against real
+	// data) in ScanAbsenceNotifications above. Loop per school under its own
+	// tenant context instead. users.mobile is a global, non-RLS column
+	// (PRD 3.2.1), so joining it inside each school's tx is still safe.
+	for _, schoolID := range allSchoolIDs {
+		sctx := tenancy.WithSchoolID(ctx, schoolID)
+		if err := db.WithTenantTx(sctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+			rows, err := tx.Query(ctx, `
+				SELECT nr.id, nr.notification_id, u.mobile, n.title
+				FROM notification_recipients nr
+				JOIN notifications n ON n.id = nr.notification_id
+				JOIN users u ON u.id = nr.user_id
+				WHERE n.is_emergency = true
+				  AND nr.push_sent_at IS NOT NULL
+				  AND nr.push_sent_at <= now() - make_interval(secs => $1)
+				  AND nr.push_acknowledged_at IS NULL
+				  AND nr.sms_sent_at IS NULL
+				  AND u.mobile IS NOT NULL
+			`, window.Seconds())
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				c := candidate{schoolID: schoolID}
+				if err := rows.Scan(&c.recipientID, &c.notificationID, &c.mobile, &c.title); err != nil {
+					return err
+				}
+				candidates = append(candidates, c)
+			}
+			return rows.Err()
+		}); err != nil {
+			return 0, fmt.Errorf("scan sms rollover candidates for school %s: %w", schoolID, err)
+		}
+	}
+
+	sent := 0
+	for _, c := range candidates {
+		// EMERGENCY_HOLIDAY DLT template (PRD 9, week 1): registered with fixed
+		// variable slots, so the message body here must match what was actually
+		// approved -- title is the one variable this template carries.
+		message := fmt.Sprintf("School alert: %s. Open the Tamil School OS app for details.", c.title)
+		if !sender.Send(ctx, c.mobile, message) {
+			continue
+		}
+		sctx := tenancy.WithSchoolID(ctx, c.schoolID)
+		if err := db.WithTenantTx(sctx, pool, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE notification_recipients SET sms_sent_at = now() WHERE id = $1`, c.recipientID)
+			return err
+		}); err != nil {
+			return sent, fmt.Errorf("mark sms sent for recipient %s: %w", c.recipientID, err)
+		}
+		sent++
+	}
+	return sent, nil
 }

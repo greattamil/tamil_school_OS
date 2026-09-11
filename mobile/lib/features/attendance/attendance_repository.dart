@@ -76,7 +76,30 @@ class AttendanceRepository {
         _db.outboxEntries.sectionId.equals(sectionId) &
             _db.outboxEntries.date.equals(date),
       );
-    return query.map((row) => row.read(_db.outboxEntries.id.count()) ?? 0).watchSingle();
+    return query
+        .map((row) => row.read(_db.outboxEntries.id.count()) ?? 0)
+        .watchSingle();
+  }
+
+  /// The oldest still-queued edit's timestamp for this register, or null if
+  /// nothing is pending -- PRD 4.2.5: "Pending registers older than 24 hours
+  /// raise an in-app warning to the teacher." Scoped to the register the
+  /// teacher actually has open, since that's the one they can act on (retry
+  /// sync, or flag it to the office); a cross-section version needs the
+  /// "my sections" resolution PROGRESS.md notes isn't built yet.
+  Stream<DateTime?> watchOldestPendingTimestamp(
+    String sectionId,
+    DateTime date,
+  ) {
+    final query = _db.selectOnly(_db.outboxEntries)
+      ..addColumns([_db.outboxEntries.clientTimestamp.min()])
+      ..where(
+        _db.outboxEntries.sectionId.equals(sectionId) &
+            _db.outboxEntries.date.equals(date),
+      );
+    return query
+        .map((row) => row.read(_db.outboxEntries.clientTimestamp.min()))
+        .watchSingle();
   }
 
   /// Pulls the section's roster and today's marks from the server and merges
@@ -89,7 +112,8 @@ class AttendanceRepository {
     final path =
         '/api/v1/sections/$sectionId/attendance?date=${_formatDate(date)}';
     final body = await _api.getJson(path, accessToken: _accessToken());
-    final entries = (body['entries'] as List<dynamic>).cast<Map<String, dynamic>>();
+    final entries = (body['entries'] as List<dynamic>)
+        .cast<Map<String, dynamic>>();
 
     final pendingIds = await _pendingEnrollmentIds(sectionId, date);
 
@@ -108,9 +132,7 @@ class AttendanceRepository {
             rollNumber: Value(e['roll_number'] as String?),
             status: Value(e['status'] as String?),
             reason: Value(e['reason'] as String?),
-            serverRevision: Value(
-              (e['server_revision'] as num?)?.toInt() ?? 0,
-            ),
+            serverRevision: Value((e['server_revision'] as num?)?.toInt() ?? 0),
             syncStatus: const Value('synced'),
           ),
           mode: InsertMode.insertOrReplace,
@@ -133,10 +155,12 @@ class AttendanceRepository {
     final now = DateTime.now().toUtc();
 
     await _db.transaction(() async {
-      final existing = await (_db.select(_db.localAttendanceEntries)..where(
-            (t) => t.enrollmentId.equals(enrollmentId) & t.date.equals(date),
-          ))
-          .getSingleOrNull();
+      final existing =
+          await (_db.select(_db.localAttendanceEntries)..where(
+                (t) =>
+                    t.enrollmentId.equals(enrollmentId) & t.date.equals(date),
+              ))
+              .getSingleOrNull();
       final baseRevision = existing?.serverRevision ?? 0;
 
       await _db
@@ -191,11 +215,12 @@ class AttendanceRepository {
         final mark = entry.value;
         final localCounter = await _device.nextLocalCounter();
 
-        final existing = await (_db.select(_db.localAttendanceEntries)..where(
-              (t) =>
-                  t.enrollmentId.equals(enrollmentId) & t.date.equals(date),
-            ))
-            .getSingleOrNull();
+        final existing =
+            await (_db.select(_db.localAttendanceEntries)..where(
+                  (t) =>
+                      t.enrollmentId.equals(enrollmentId) & t.date.equals(date),
+                ))
+                .getSingleOrNull();
         final baseRevision = existing?.serverRevision ?? 0;
 
         await _db
@@ -236,10 +261,9 @@ class AttendanceRepository {
     String sectionId,
     DateTime date,
   ) async {
-    final rows = await (_db.select(_db.outboxEntries)..where(
-          (t) => t.sectionId.equals(sectionId) & t.date.equals(date),
-        ))
-        .get();
+    final rows = await (_db.select(
+      _db.outboxEntries,
+    )..where((t) => t.sectionId.equals(sectionId) & t.date.equals(date))).get();
     return rows.map((r) => r.enrollmentId).toSet();
   }
 
@@ -253,10 +277,9 @@ class AttendanceRepository {
   /// cleared together once the sent edit's outcome is known.
   Future<SyncFlushResult> flushOutbox(String sectionId, DateTime date) async {
     final deviceId = await _device.deviceId();
-    final allPending = await (_db.select(_db.outboxEntries)..where(
-          (t) => t.sectionId.equals(sectionId) & t.date.equals(date),
-        ))
-        .get();
+    final allPending = await (_db.select(
+      _db.outboxEntries,
+    )..where((t) => t.sectionId.equals(sectionId) & t.date.equals(date))).get();
     if (allPending.isEmpty) {
       return SyncFlushResult(appliedCount: 0, overridden: []);
     }
@@ -295,7 +318,8 @@ class AttendanceRepository {
       {'date': _formatDate(date), 'edits': edits},
       accessToken: _accessToken(),
     );
-    final results = (body['results'] as List<dynamic>).cast<Map<String, dynamic>>();
+    final results = (body['results'] as List<dynamic>)
+        .cast<Map<String, dynamic>>();
 
     var applied = 0;
     final overridden = <OverriddenEntry>[];
@@ -309,8 +333,7 @@ class AttendanceRepository {
         final currentReason = result['current_reason'] as String?;
 
         await (_db.update(_db.localAttendanceEntries)..where(
-              (t) =>
-                  t.enrollmentId.equals(enrollmentId) & t.date.equals(date),
+              (t) => t.enrollmentId.equals(enrollmentId) & t.date.equals(date),
             ))
             .write(
               LocalAttendanceEntriesCompanion(
@@ -331,17 +354,20 @@ class AttendanceRepository {
         if (outcome == 'applied') {
           applied++;
         } else {
-          final studentRow = await (_db.select(_db.localAttendanceEntries)..where(
-                (t) =>
-                    t.enrollmentId.equals(enrollmentId) & t.date.equals(date),
-              ))
-              .getSingleOrNull();
+          final studentRow =
+              await (_db.select(_db.localAttendanceEntries)..where(
+                    (t) =>
+                        t.enrollmentId.equals(enrollmentId) &
+                        t.date.equals(date),
+                  ))
+                  .getSingleOrNull();
           overridden.add(
             OverriddenEntry(
               enrollmentId: enrollmentId,
               studentName: studentRow?.studentName ?? enrollmentId,
               currentStatus: currentStatus,
-              message: (result['message'] as String?) ?? 'Edit was not applied.',
+              message:
+                  (result['message'] as String?) ?? 'Edit was not applied.',
             ),
           );
         }

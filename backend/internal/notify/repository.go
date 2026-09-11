@@ -92,6 +92,44 @@ func (r *Repository) Compose(ctx context.Context, in ComposeInput, createdBy uui
 	return notificationID, recipientCount, nil
 }
 
+// TeacherOwnsSection reports whether userID is a currently-active teacher
+// (section_teachers, scoped to the active academic year) assigned to sectionID --
+// class teacher or subject teacher, either is sufficient to notice their own
+// section (PRD 2.2 role matrix: "class teacher ... sends notices to their
+// section"; subject teachers reasonably share that reach for their sections too).
+func (r *Repository) TeacherOwnsSection(ctx context.Context, userID, sectionID uuid.UUID) (bool, error) {
+	var owns bool
+	err := db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM section_teachers st
+				JOIN staff s ON s.id = st.staff_id AND s.deleted_at IS NULL
+				JOIN academic_years ay ON ay.id = st.academic_year_id AND ay.state = 'active'
+				WHERE s.user_id = $1 AND st.section_id = $2 AND st.deleted_at IS NULL
+			)
+		`, userID, sectionID).Scan(&owns)
+	})
+	return owns, err
+}
+
+// TeacherOwnsStudent reports whether userID teaches the section studentID is
+// currently enrolled in.
+func (r *Repository) TeacherOwnsStudent(ctx context.Context, userID, studentID uuid.UUID) (bool, error) {
+	var owns bool
+	err := db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM section_teachers st
+				JOIN staff s ON s.id = st.staff_id AND s.deleted_at IS NULL
+				JOIN academic_years ay ON ay.id = st.academic_year_id AND ay.state = 'active'
+				JOIN enrollments e ON e.section_id = st.section_id AND e.deleted_at IS NULL AND upper_inf(e.period)
+				WHERE s.user_id = $1 AND e.student_id = $2 AND st.deleted_at IS NULL
+			)
+		`, userID, studentID).Scan(&owns)
+	})
+	return owns, err
+}
+
 func resolveRecipients(ctx context.Context, tx pgx.Tx, in ComposeInput) ([]recipient, error) {
 	var rows pgx.Rows
 	var err error
@@ -238,6 +276,19 @@ func (r *Repository) Inbox(ctx context.Context, userID uuid.UUID, limit int) ([]
 		return rows.Err()
 	})
 	return out, err
+}
+
+// AckPush records that a recipient's device received a push, so the SMS-rollover
+// scan (PRD 4.5.3) can stop treating it as undelivered. Idempotent: acking twice,
+// or acking after an SMS already went out, is harmless.
+func (r *Repository) AckPush(ctx context.Context, userID, notificationID uuid.UUID) error {
+	return db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			UPDATE notification_recipients SET push_acknowledged_at = now()
+			WHERE user_id = $1 AND notification_id = $2 AND push_acknowledged_at IS NULL
+		`, userID, notificationID)
+		return err
+	})
 }
 
 func (r *Repository) MarkRead(ctx context.Context, userID, notificationID uuid.UUID) error {

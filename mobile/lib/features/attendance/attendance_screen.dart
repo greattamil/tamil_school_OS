@@ -14,7 +14,11 @@ import 'attendance_repository.dart';
 /// immediately; the network is something that happens to a queue in the
 /// background, never something the teacher is left waiting on.
 class AttendanceScreen extends ConsumerStatefulWidget {
-  const AttendanceScreen({super.key, required this.sectionId, required this.date});
+  const AttendanceScreen({
+    super.key,
+    required this.sectionId,
+    required this.date,
+  });
 
   final String sectionId;
   final DateTime date;
@@ -33,7 +37,8 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen>
   bool _syncing = false;
   String? _refreshError;
 
-  DateTime get _day => DateTime(widget.date.year, widget.date.month, widget.date.day);
+  DateTime get _day =>
+      DateTime(widget.date.year, widget.date.month, widget.date.day);
 
   @override
   void initState() {
@@ -45,7 +50,8 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen>
       database: session.database!,
       api: ref.read(apiClientProvider),
       deviceIdentity: session.deviceIdentity!,
-      accessToken: () => ref.read(sessionControllerProvider).session!.accessToken,
+      accessToken: () =>
+          ref.read(sessionControllerProvider).session!.accessToken,
     );
     _connectivity = ConnectivityService();
 
@@ -155,7 +161,9 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen>
                             ? const SizedBox(
                                 width: 18,
                                 height: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
                               )
                             : const Icon(Icons.sync),
                         tooltip: 'Sync now',
@@ -169,88 +177,131 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen>
           ),
         ],
       ),
-      body: StreamBuilder<List<LocalAttendanceEntry>>(
-        stream: _repo.watchRoster(widget.sectionId, _day),
-        builder: (context, snapshot) {
-          final roster = snapshot.data ?? [];
-          if (roster.isEmpty) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('No students found for this section.'),
-                    if (_refreshError != null) ...[
-                      const SizedBox(height: 8),
-                      Text(
-                        'Could not refresh from the server: $_refreshError',
-                        style: Theme.of(context).textTheme.bodySmall,
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
-                  ],
+      body: Column(
+        children: [
+          // PRD 4.2.5: "Pending registers older than 24 hours raise an
+          // in-app warning to the teacher."
+          StreamBuilder<DateTime?>(
+            stream: _repo.watchOldestPendingTimestamp(widget.sectionId, _day),
+            builder: (context, snapshot) {
+              final oldest = snapshot.data;
+              if (oldest == null ||
+                  DateTime.now().difference(oldest) <
+                      const Duration(hours: 24)) {
+                return const SizedBox.shrink();
+              }
+              return MaterialBanner(
+                backgroundColor: Colors.amber.shade100,
+                content: const Text(
+                  'This register has been waiting to sync for over 24 hours. '
+                  'Check your connection or tell the office if this continues.',
                 ),
-              ),
-            );
-          }
-
-          // Seed the working set: whatever's already recorded, or a present
-          // default for anyone not yet marked (PRD 4.2.1: "all defaulted to
-          // present").
-          for (final entry in roster) {
-            _marks.putIfAbsent(
-              entry.enrollmentId,
-              () => (status: entry.status ?? 'present', reason: entry.reason),
-            );
-          }
-
-          return Column(
-            children: [
-              Expanded(
-                child: ListView.builder(
-                  itemCount: roster.length,
-                  itemBuilder: (context, index) {
-                    final entry = roster[index];
-                    final mark = _marks[entry.enrollmentId]!;
-                    final isAbsent = mark.status == 'absent';
-                    return ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: isAbsent ? Colors.red.shade100 : Colors.green.shade100,
-                        child: Icon(
-                          isAbsent ? Icons.close : Icons.check,
-                          color: isAbsent ? Colors.red : Colors.green,
-                        ),
-                      ),
-                      title: Text(entry.studentName),
-                      subtitle: Text(
-                        [
-                          if (entry.rollNumber != null) 'Roll ${entry.rollNumber}',
-                          isAbsent && mark.reason != null ? mark.reason! : null,
-                        ].whereType<String>().join(' -- '),
-                      ),
-                      trailing: entry.syncStatus == 'pending'
-                          ? const Icon(Icons.cloud_upload_outlined, size: 18)
-                          : const Icon(Icons.cloud_done_outlined, size: 18, color: Colors.grey),
-                      onTap: () => _toggle(entry.enrollmentId),
-                      onLongPress: isAbsent ? () => _pickReason(entry.enrollmentId) : null,
-                    );
-                  },
-                ),
-              ),
-              SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: FilledButton(
-                    onPressed: () => _confirm(roster),
-                    child: const Text('Confirm & sync register'),
+                actions: [
+                  TextButton(
+                    onPressed: _syncing ? null : _flushIfPending,
+                    child: const Text('Retry sync'),
                   ),
+                ],
+              );
+            },
+          ),
+          Expanded(child: _rosterBody()),
+        ],
+      ),
+    );
+  }
+
+  Widget _rosterBody() {
+    return StreamBuilder<List<LocalAttendanceEntry>>(
+      stream: _repo.watchRoster(widget.sectionId, _day),
+      builder: (context, snapshot) {
+        final roster = snapshot.data ?? [];
+        if (roster.isEmpty) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('No students found for this section.'),
+                  if (_refreshError != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      'Could not refresh from the server: $_refreshError',
+                      style: Theme.of(context).textTheme.bodySmall,
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          );
+        }
+
+        // Seed the working set: whatever's already recorded, or a present
+        // default for anyone not yet marked (PRD 4.2.1: "all defaulted to
+        // present").
+        for (final entry in roster) {
+          _marks.putIfAbsent(
+            entry.enrollmentId,
+            () => (status: entry.status ?? 'present', reason: entry.reason),
+          );
+        }
+
+        return Column(
+          children: [
+            Expanded(
+              child: ListView.builder(
+                itemCount: roster.length,
+                itemBuilder: (context, index) {
+                  final entry = roster[index];
+                  final mark = _marks[entry.enrollmentId]!;
+                  final isAbsent = mark.status == 'absent';
+                  return ListTile(
+                    leading: CircleAvatar(
+                      backgroundColor: isAbsent
+                          ? Colors.red.shade100
+                          : Colors.green.shade100,
+                      child: Icon(
+                        isAbsent ? Icons.close : Icons.check,
+                        color: isAbsent ? Colors.red : Colors.green,
+                      ),
+                    ),
+                    title: Text(entry.studentName),
+                    subtitle: Text(
+                      [
+                        if (entry.rollNumber != null)
+                          'Roll ${entry.rollNumber}',
+                        isAbsent && mark.reason != null ? mark.reason! : null,
+                      ].whereType<String>().join(' -- '),
+                    ),
+                    trailing: entry.syncStatus == 'pending'
+                        ? const Icon(Icons.cloud_upload_outlined, size: 18)
+                        : const Icon(
+                            Icons.cloud_done_outlined,
+                            size: 18,
+                            color: Colors.grey,
+                          ),
+                    onTap: () => _toggle(entry.enrollmentId),
+                    onLongPress: isAbsent
+                        ? () => _pickReason(entry.enrollmentId)
+                        : null,
+                  );
+                },
+              ),
+            ),
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: FilledButton(
+                  onPressed: () => _confirm(roster),
+                  child: const Text('Confirm & sync register'),
                 ),
               ),
-            ],
-          );
-        },
-      ),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -287,7 +338,8 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen>
 
   Future<void> _confirm(List<LocalAttendanceEntry> roster) async {
     final marksForConfirmedRoster = {
-      for (final entry in roster) entry.enrollmentId: _marks[entry.enrollmentId]!,
+      for (final entry in roster)
+        entry.enrollmentId: _marks[entry.enrollmentId]!,
     };
     await _repo.confirmRegister(
       sectionId: widget.sectionId,
@@ -296,9 +348,9 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen>
     );
     await _flushIfPending();
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Register saved.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Register saved.')));
     }
   }
 }

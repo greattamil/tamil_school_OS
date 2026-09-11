@@ -253,6 +253,77 @@ func (r *Repository) FindSectionByName(ctx context.Context, academicYearID uuid.
 	return out, nil
 }
 
+// SetCalendarDays upserts one day_type per date (PRD 3.1: "the office sets the
+// year's calendar at the start and amends it as holidays are declared" --
+// amending is exactly what the ON CONFLICT UPDATE is for, since a date already
+// classified, e.g. regular_working, is routinely reclassified to holiday later).
+// No separate recomputation step is needed for the "declaring a rain holiday
+// retroactively ... recomputation of affected percentages happens automatically"
+// requirement: AttendancePercentage reads this table live on every call.
+func (r *Repository) SetCalendarDays(ctx context.Context, days []CalendarDay, updatedBy uuid.UUID) error {
+	schoolID, ok := tenancy.SchoolID(ctx)
+	if !ok {
+		return db.ErrNoTenant
+	}
+	return db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		batch := &pgx.Batch{}
+		for _, d := range days {
+			batch.Queue(`
+				INSERT INTO academic_calendar_days (school_id, date, day_type, note, updated_by)
+				VALUES ($1, $2, $3, $4, $5)
+				ON CONFLICT (school_id, date) DO UPDATE
+				SET day_type = EXCLUDED.day_type, note = EXCLUDED.note,
+				    updated_by = EXCLUDED.updated_by, updated_at = now()
+			`, schoolID, d.Date, d.DayType, nullIfEmptyString(d.Note), updatedBy)
+		}
+		br := tx.SendBatch(ctx, batch)
+		defer br.Close()
+		for range days {
+			if _, err := br.Exec(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ListCalendarDays returns every explicitly-set day in [from, to], ordered by
+// date. A date in range with no row here has never been classified -- the
+// caller (e.g. AttendancePercentage) treats an entirely-unset range as "no
+// calendar configured yet" and falls back accordingly, rather than assuming
+// every unlisted date is a working day.
+func (r *Repository) ListCalendarDays(ctx context.Context, from, to any) ([]CalendarDay, error) {
+	out := []CalendarDay{}
+	err := db.WithTenantTx(ctx, r.pool, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT date, day_type, COALESCE(note, '')
+			FROM academic_calendar_days
+			WHERE date BETWEEN $1 AND $2
+			ORDER BY date
+		`, from, to)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var d CalendarDay
+			if err := rows.Scan(&d.Date, &d.DayType, &d.Note); err != nil {
+				return err
+			}
+			out = append(out, d)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+func nullIfEmptyString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 func isUniqueViolation(err error) bool {
 	var pgErr interface{ SQLState() string }
 	if errors.As(err, &pgErr) {

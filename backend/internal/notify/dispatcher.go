@@ -42,3 +42,19 @@ func (LogDispatcher) SendMulticast(ctx context.Context, tokens []string, title, 
 	}
 	return results
 }
+
+// SMSSender sends a single SMS via the pre-approved DLT template family (PRD
+// 9, week 1: OTP_LOGIN, ATTENDANCE_ABSENT, EMERGENCY_HOLIDAY, etc. -- template
+// registration is an external process this codebase can't perform, so, like
+// Dispatcher/LogDispatcher, only the actual telecom-operator API call is
+// stubbed here). Returns whether the send succeeded.
+type SMSSender interface {
+	Send(ctx context.Context, mobile, message string) bool
+}
+
+type LogSMSSender struct{}
+
+func (LogSMSSender) Send(ctx context.Context, mobile, message string) bool {
+	log.Printf("notify: [stub SMS dispatch] mobile=%s message=%q", mobile, message)
+	return true
+}

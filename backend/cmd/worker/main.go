@@ -52,6 +52,13 @@ func run() error {
 	// gives a default of 11:00, not a to-the-second SLA).
 	scanTicker := time.NewTicker(1 * time.Minute)
 	defer scanTicker.Stop()
+	// PRD 4.5.3: emergency-broadcast SMS rollover after a 3-minute unacknowledged
+	// window -- checked more often than that window so no recipient waits much
+	// past it, but not so often it's meaningfully different from checking on the
+	// window's own cadence.
+	const smsRolloverWindow = 3 * time.Minute
+	smsRolloverTicker := time.NewTicker(30 * time.Second)
+	defer smsRolloverTicker.Stop()
 
 	for {
 		select {
@@ -75,6 +82,15 @@ func run() error {
 			}
 			if n > 0 {
 				log.Printf("worker: absence scan enqueued alerts for %d school(s)", n)
+			}
+		case <-smsRolloverTicker.C:
+			n, err := notify.ScanSMSRollover(ctx, pool, notify.LogSMSSender{}, smsRolloverWindow)
+			if err != nil {
+				log.Printf("worker: sms rollover scan: %v", err)
+				continue
+			}
+			if n > 0 {
+				log.Printf("worker: sms rollover sent %d message(s)", n)
 			}
 		}
 	}
